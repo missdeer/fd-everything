@@ -62,6 +62,7 @@ fn create_working_directory(
     Ok(temp_dir)
 }
 
+#[cfg(not(windows))]
 fn create_config_directory_with_global_ignore(ignore_file_content: &str) -> io::Result<TempDir> {
     let config_dir = tempfile::Builder::new().prefix("fd-config").tempdir()?;
     let fd_dir = config_dir.path().join("fd");
@@ -72,10 +73,10 @@ fn create_config_directory_with_global_ignore(ignore_file_content: &str) -> io::
     Ok(config_dir)
 }
 
-/// Find the *fd* executable.
+/// Find the *fde* executable.
 fn find_fd_exe() -> PathBuf {
-    // Read the location of the fd executable from the environment
-    PathBuf::from(env::var("CARGO_BIN_EXE_fd").unwrap_or(env!("CARGO_BIN_EXE_fd").to_string()))
+    // Read the location of the fde executable from the environment
+    PathBuf::from(env::var("CARGO_BIN_EXE_fde").unwrap_or(env!("CARGO_BIN_EXE_fde").to_string()))
 }
 
 /// Format an error message for when *fd* did not exit successfully.
@@ -166,6 +167,7 @@ impl TestEnv {
         }
     }
 
+    #[cfg(not(windows))]
     pub fn global_ignore_file(self, content: &str) -> TestEnv {
         let config_dir =
             create_config_directory_with_global_ignore(content).expect("config directory");
@@ -309,6 +311,19 @@ impl TestEnv {
         // Make sure LS_COLORS is unset to ensure consistent
         // color output
         cmd.env("LS_COLORS", "");
+        // PLAN §Phase 8.7.1 MUST 3 test-harness invariant: this suite
+        // verifies fd-parity behaviour on Windows tempdirs. After the
+        // MUST 3 default-flip, the production probe routes any tempdir
+        // whose parent (e.g. `%TEMP%`) is already in the Everything
+        // index into EverythingBackend — and Everything's async USN
+        // watcher lags brand-new files by ~hundreds of milliseconds,
+        // producing flaky stale-index hits. `FDE_TEST_FORCE_LEGACY=1`
+        // short-circuits that path in `walk::run_everything_paths` so
+        // these tests stay deterministic across CI and dev machines.
+        // The `EverythingBackend` integration path is covered by
+        // `tests/real_everything.rs` (against the real index) and
+        // `tests/mock_e2e.rs` (against the deterministic mock backend).
+        cmd.env("FDE_TEST_FORCE_LEGACY", "1");
         cmd.args(args);
 
         // Run *fd*.

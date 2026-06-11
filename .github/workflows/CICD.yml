@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - master
+      - everything
     tags:
       - '*'
 
@@ -19,15 +20,18 @@ permissions:
 jobs:
   crate_metadata:
     name: Extract crate metadata
+    # cargo metadata only parses Cargo.toml; doesn't invoke compile_error!.
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7.0.1
       with:
         persist-credentials: false
+    - uses: dtolnay/rust-toolchain@stable
     - name: Extract crate information
       id: crate_metadata
+      shell: bash
       run: |
-        echo "name=fd" | tee -a $GITHUB_OUTPUT
+        echo "name=fde" | tee -a $GITHUB_OUTPUT
         cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
         cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + .packages[0].authors[0]' | tee -a $GITHUB_OUTPUT
         cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + .packages[0].homepage' | tee -a $GITHUB_OUTPUT
@@ -41,7 +45,10 @@ jobs:
 
   ensure_cargo_fmt:
     name: Ensure 'cargo fmt' has been run
-    runs-on: ubuntu-22.04
+    # fmt is parse-only; runs anywhere. Kept on Windows for consistency with
+    # the rest of the pipeline (fde is Windows-only — `compile_error!` rejects
+    # other platforms).
+    runs-on: windows-2025
     steps:
     - uses: dtolnay/rust-toolchain@stable
       with:
@@ -53,7 +60,7 @@ jobs:
 
   lint_check:
     name: Ensure 'cargo clippy' has no warnings
-    runs-on: ubuntu-latest
+    runs-on: windows-2025
     steps:
     - uses: dtolnay/rust-toolchain@stable
       with:
@@ -65,7 +72,7 @@ jobs:
 
   min_version:
     name: Minimum supported rust version
-    runs-on: ubuntu-22.04
+    runs-on: windows-2025
     needs: crate_metadata
     steps:
     - name: Checkout source code
@@ -78,10 +85,18 @@ jobs:
       with:
         toolchain: ${{ needs.crate_metadata.outputs.msrv }}
         components: clippy
+    - name: Install Everything (service)
+      shell: pwsh
+      run: |
+        choco install everything --version=1.4.1.1026 -y --no-progress
+        # Start the service so tests that touch the SDK have an index.
+        Start-Service "Everything" -ErrorAction SilentlyContinue
     - name: Run clippy (on minimum supported rust version to prevent warnings we can't fix)
-      run: cargo clippy --locked --all-targets "${MSRV_FEATURES}"
+      shell: bash
+      run: cargo clippy --locked --all-targets ${MSRV_FEATURES}
     - name: Run tests
-      run: cargo test --locked "${MSRV_FEATURES}"
+      shell: bash
+      run: cargo test --locked ${MSRV_FEATURES}
 
   build:
     name: '${{ matrix.job.target }} (${{ matrix.job.os }})'
@@ -95,22 +110,13 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - { target: aarch64-unknown-linux-gnu   , os: ubuntu-24.04, use-cross: true }
-          - { target: aarch64-unknown-linux-musl  , os: ubuntu-24.04, use-cross: true }
-          - { target: arm-unknown-linux-gnueabihf , os: ubuntu-24.04, use-cross: true }
-          - { target: arm-unknown-linux-musleabihf, os: ubuntu-24.04, use-cross: true }
+          # fde is Windows-only. Non-Windows targets removed per PLAN.md Phase 0.
           - { target: i686-pc-windows-msvc        , os: windows-2025                  }
-          - { target: i686-unknown-linux-gnu      , os: ubuntu-24.04, use-cross: true }
-          - { target: i686-unknown-linux-musl     , os: ubuntu-24.04, use-cross: true }
-          - { target: x86_64-apple-darwin         , os: macos-26-intel                }
-          - { target: aarch64-apple-darwin        , os: macos-26                      }
           - { target: x86_64-pc-windows-gnu       , os: windows-2025                  }
           - { target: x86_64-pc-windows-msvc      , os: windows-2025                  }
           - { target: aarch64-pc-windows-msvc     , os: windows-11-arm                }
-          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-24.04, use-cross: true }
-          - { target: x86_64-unknown-linux-musl   , os: ubuntu-24.04, use-cross: true }
     env:
-      BUILD_CMD: "${{ matrix.job.use-cross && 'cross' || 'cargo' }}"
+      BUILD_CMD: "cargo"
       target: ${{ matrix.job.target }}
       name: ${{ needs.crate_metadata.outputs.name }}
     steps:
@@ -119,38 +125,28 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Install prerequisites
-      shell: bash
-      run: |
-        case ${target} in
-          arm-unknown-linux-*) sudo apt-get -y update ; sudo apt-get -y install gcc-arm-linux-gnueabihf ;;
-          aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
-        esac
-
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.job.target }}
         toolchain: "stable"
 
-    - name: Install cross
-      if: matrix.job.use-cross
-      env:
-        cross_version: "v0.2.5"
-        package_name: "cross-x86_64-unknown-linux-gnu.tar.gz"
-        GH_TOKEN: "${{ github.token }}"
+    - name: Install Everything (service)
+      shell: pwsh
       run: |
-        dir="$HOME/.local/bin/"
-        mkdir -p "$dir"
-        gh release download --repo cross-rs/cross  \
-          --pattern "${package_name}" -O - "${cross_version}" \
-          | tar -C "$dir" -xz
-        echo "$dir" >> $GITHUB_PATH
-        echo "Installed cross $cross_version" >> $GITHUB_STEP_SUMMARY
-    - name: Show version information (Rust, cargo, GCC)
+        # PLAN.md Phase 0: preinstall Everything >= 1.4.1, start the service.
+        # Skipped on the ARM64 runner — voidtools provides no native ARM64
+        # build yet; tests that need the SDK are gated separately.
+        if ("${{ matrix.job.target }}" -like "aarch64-*") {
+          Write-Host "Skipping Everything install on ARM64 runner"
+          exit 0
+        }
+        choco install everything --version=1.4.1.1026 -y --no-progress
+        Start-Service "Everything" -ErrorAction SilentlyContinue
+
+    - name: Show version information (Rust, cargo)
       shell: bash
       run: |
-        gcc --version || true
         rustup -V
         rustup toolchain list
         rustup default
@@ -165,17 +161,9 @@ jobs:
       id: bin
       shell: bash
       run: |
-        # Figure out suffix of binary
-        EXE_suffix=""
-        case ${target} in
-          *-pc-windows-*) EXE_suffix=".exe" ;;
-        esac;
-
-        # Setup paths
+        EXE_suffix=".exe"
         BIN_NAME="${name}${EXE_suffix}"
         BIN_PATH="target/${target}/release/${BIN_NAME}"
-
-        # Let subsequent steps know where to find the binary
         echo "BIN_PATH=${BIN_PATH}" >> $GITHUB_OUTPUT
         echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_OUTPUT
 
@@ -183,10 +171,11 @@ jobs:
       id: test-options
       shell: bash
       run: |
-        # test only library unit tests and binary for arm-type targets
         unset CARGO_TEST_OPTIONS
         case ${target} in
-        arm-* | aarch64-*)
+        aarch64-*)
+          # No native Everything on ARM64; restrict to bin-level unit tests
+          # until LegacyWalkerBackend / MockBackend cover this matrix slot.
           CARGO_TEST_OPTIONS="--bin=${name}" ;;
         esac
         echo "CARGO_TEST_OPTIONS=${CARGO_TEST_OPTIONS}" >> $GITHUB_OUTPUT
@@ -209,10 +198,7 @@ jobs:
         BIN_PATH: ${{ steps.bin.outputs.BIN_PATH }}
         version: ${{ needs.crate_metadata.outputs.version }}
       run: |
-        PKG_suffix=".tar.gz"
-        case ${target} in
-        *-pc-windows-*) PKG_suffix=".zip" ;;
-        esac
+        PKG_suffix=".zip"
         PKG_BASENAME=${name}-v${version}-${target}
         PKG_NAME=${PKG_BASENAME}${PKG_suffix}
         echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
@@ -228,31 +214,17 @@ jobs:
         cp "README.md" "LICENSE-MIT" "LICENSE-APACHE" "CHANGELOG.md" "$ARCHIVE_DIR"
 
         # Man page
-        cp "doc/${name}.1" "$ARCHIVE_DIR"
+        cp "doc/${name}.1" "$ARCHIVE_DIR" 2>/dev/null || cp "doc/fd.1" "$ARCHIVE_DIR"
 
         # Autocompletion files
         cp -r autocomplete "${ARCHIVE_DIR}"
 
         # base compressed package
         pushd "${PKG_STAGING}/" >/dev/null
-        case ${target} in
-          *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
-          *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
-        esac;
+        7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2
         popd >/dev/null
 
-        # Let subsequent steps know where to find the compressed package
         echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_OUTPUT
-
-    - name: Create Debian package
-      id: debian-package
-      shell: bash
-      if: startsWith(matrix.job.os, 'ubuntu')
-      run: bash scripts/create-deb.sh
-      env:
-        TARGET: ${{ matrix.job.target }}
-        DPKG_VERSION: ${{ needs.crate_metadata.version }}
-        BIN_PATH: ${{ steps.bin.outputs.BIN_PATH }}
 
     - name: "Artifact upload: tarball"
       id: upload-tarball
@@ -260,16 +232,7 @@ jobs:
       with:
         name: ${{ steps.package.outputs.PKG_NAME }}
         path: ${{ steps.package.outputs.PKG_PATH }}
-        compression-level: 0 # tarball is already compressed
-
-    - name: "Artifact upload: Debian package"
-      id: upload-deb
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-      if: steps.debian-package.outputs.DPKG_NAME
-      with:
-        name: ${{ steps.debian-package.outputs.DPKG_NAME }}
-        path: ${{ steps.debian-package.outputs.DPKG_PATH }}
-        compression-level: 0 # deb files are already compressed
+        compression-level: 0
 
     - name: Check for release
       id: is-release
@@ -284,7 +247,6 @@ jobs:
       with:
         subject-path: |
           ${{ steps.package.outputs.PKG_PATH }}
-          ${{ steps.debian-package.outputs.DPKG_PATH }}
 
     - name: Publish archives and packages
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
@@ -292,18 +254,9 @@ jobs:
       with:
         files: |
           ${{ steps.package.outputs.PKG_PATH }}
-          ${{ steps.debian-package.outputs.DPKG_PATH }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  winget:
-    name: Publish to Winget
-    runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
-        with:
-          identifier: sharkdp.fd
-          installers-regex: '-pc-windows-msvc\.zip$'
-          token: ${{ secrets.WINGET_TOKEN }}
+  # winget job intentionally removed — fde is a fork; upstream sharkdp.fd
+  # identifier should not be re-published. Reintroduce under a new identifier
+  # once the fork has a release cadence.

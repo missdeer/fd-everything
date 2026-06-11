@@ -2876,3 +2876,60 @@ fn test_ignore_contain_precedence_over_root_check() {
     let expected = "";
     te.assert_output(&["--ignore-contain=CACHEDIR.TAG", "."], expected);
 }
+
+/// PLAN.md §Phase 8.5 + §Phase 8.7.1 MUST 3: pin the
+/// `--filesystem-walker` CLI flag as the "force LegacyWalker" escape
+/// hatch. The flag is plumbed into `Config.force_legacy` and consulted
+/// by `selection::select_backend` before any probe runs. With MUST 3
+/// the env-var gate is gone — routing is decided by the
+/// `EverythingVolumeIndexProbe`, which returns false for unindexed
+/// paths (every tempdir in this test suite) and so falls back to
+/// LegacyWalker. Byte-identical output between flag-on and the default
+/// path therefore comes from "probe → Legacy" not "gate → Legacy",
+/// but the user-visible assertion is unchanged.
+#[test]
+fn test_filesystem_walker_routes_to_legacy_walker() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+    let expected = "a.foo
+        one/b.foo
+        one/two/c.foo
+        one/two/C.Foo2
+        one/two/three/d.foo
+        one/two/three/directory_foo/";
+    te.assert_output(&["--filesystem-walker", "foo"], expected);
+}
+
+// PLAN.md §Phase 8.5-E `test_default_routing_matches_filesystem_walker`
+// was retired in §Phase 8.7.1 MUST 3. Its intent — "default routing
+// produces the same output as --filesystem-walker" — became vacuous
+// inside this harness once `TestEnv::run_command` started setting
+// `FDE_TEST_FORCE_LEGACY=1`: both branches go through LegacyWalker so
+// the assertion would trivially pass and stop encoding a meaningful
+// invariant (Rule 9). The routing-seam alarm now lives in
+// `tests/real_everything.rs::real_everything_smoke_finds_system32_executables`,
+// which proves the dispatcher fires against the real Everything index
+// under non-tempdir conditions, and in
+// `real_everything_probe_falls_back_for_unindexed_tempdir`, which
+// proves the probe correctly demotes fresh tempdirs to Legacy. A
+// proper "default == --filesystem-walker byte-for-byte" alarm against
+// a real (warmed) Everything index is tracked as a deferral; see the
+// project_phase_8_7_1_test_flake memory note.
+
+/// PLAN.md §Phase 8: `--filesystem-walker` must compose with `--no-ignore`
+/// without conflict — both are escape hatches from default fde behaviour
+/// and must be free to combine. If clap ever rejects this combination, the
+/// regression caller would otherwise lose their primary way of producing a
+/// "fd parity" diff (force legacy walker + bypass all ignore files).
+#[test]
+fn test_filesystem_walker_composes_with_no_ignore() {
+    let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
+    let expected = "a.foo
+        fdignored.foo
+        gitignored.foo
+        one/b.foo
+        one/two/c.foo
+        one/two/C.Foo2
+        one/two/three/d.foo
+        one/two/three/directory_foo/";
+    te.assert_output(&["--filesystem-walker", "--no-ignore", "foo"], expected);
+}

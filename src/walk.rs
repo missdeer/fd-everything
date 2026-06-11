@@ -2,14 +2,14 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use etcetera::BaseStrategy;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{WalkBuilder, WalkParallel, WalkState};
@@ -22,6 +22,19 @@ use crate::exec;
 use crate::exit_codes::{ExitCode, merge_exitcodes};
 use crate::filesystem;
 use crate::output;
+#[cfg(target_os = "windows")]
+use crate::scan::backend::everything::{
+    EverythingBackend, EverythingError,
+    probe::EverythingVolumeIndexProbe,
+    query::TranslationInput,
+    selection::{AssumeIndexedProbe, BackendChoice, VolumeIndexProbe, select_backend},
+};
+use crate::scan::backend::{BackendError, BackendQuery, CancellationToken, SearchBackend};
+use crate::scan::mock_injection;
+use crate::scan::pipeline_builder::build_pipeline;
+use crate::scan::post_filter::PostFilterSink;
+use crate::scan::sink::{Batch, BatchSender, WorkerResult};
+use crate::scan::sink_adapter::RawHitBatchSink;
 
 /// The receiver thread can either be buffering results or directly streaming to the console.
 #[derive(PartialEq)]
@@ -32,93 +45,6 @@ enum ReceiverMode {
 
     /// Receiver is directly printing results to the output.
     Streaming,
-}
-
-/// The Worker threads can result in a valid entry having PathBuf or an error.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-pub enum WorkerResult {
-    // Errors should be rare, so it's probably better to allow large_enum_variant than
-    // to box the Entry variant
-    Entry(DirEntry),
-    Error(ignore::Error),
-}
-
-/// A batch of WorkerResults to send over a channel.
-#[derive(Clone)]
-struct Batch {
-    items: Arc<Mutex<Option<Vec<WorkerResult>>>>,
-}
-
-impl Batch {
-    fn new() -> Self {
-        Self {
-            items: Arc::new(Mutex::new(Some(vec![]))),
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<Vec<WorkerResult>>> {
-        self.items.lock().unwrap()
-    }
-}
-
-impl IntoIterator for Batch {
-    type Item = WorkerResult;
-    type IntoIter = std::vec::IntoIter<WorkerResult>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.lock().take().unwrap().into_iter()
-    }
-}
-
-/// Wrapper that sends batches of items at once over a channel.
-struct BatchSender {
-    batch: Batch,
-    tx: Sender<Batch>,
-    limit: usize,
-}
-
-impl BatchSender {
-    fn new(tx: Sender<Batch>, limit: usize) -> Self {
-        Self {
-            batch: Batch::new(),
-            tx,
-            limit,
-        }
-    }
-
-    /// Check if we need to flush a batch.
-    fn needs_flush(&self, batch: Option<&Vec<WorkerResult>>) -> bool {
-        match batch {
-            // Limit the batch size to provide some backpressure
-            Some(vec) => vec.len() >= self.limit,
-            // Batch was already taken by the receiver, so make a new one
-            None => true,
-        }
-    }
-
-    /// Add an item to a batch.
-    fn send(&mut self, item: WorkerResult) -> Result<(), SendError<()>> {
-        let mut batch = self.batch.lock();
-
-        if self.needs_flush(batch.as_ref()) {
-            drop(batch);
-            self.batch = Batch::new();
-            batch = self.batch.lock();
-        }
-
-        let items = batch.as_mut().unwrap();
-        items.push(item);
-
-        if items.len() == 1 {
-            // New batch, send it over the channel
-            self.tx
-                .send(self.batch.clone())
-                .map_err(|_| SendError(()))?;
-        }
-
-        Ok(())
-    }
 }
 
 /// Maximum size of the output buffer before flushing results to the console
@@ -308,23 +234,47 @@ struct WorkerState {
     patterns: Vec<Regex>,
     /// The command line configuration.
     config: Config,
+    /// PLAN.md §Phase 2: cached scan-time CWD. Used by `DirEntry`
+    /// constructors to canonicalize the relative paths the legacy
+    /// `ignore::WalkBuilder` yields without paying an env::current_dir()
+    /// syscall per hit. Captured once after `set_working_dir` runs (so
+    /// it already reflects `--base-directory`).
+    cwd: Arc<PathBuf>,
     /// Flag for cleanly shutting down the parallel walk
     quit_flag: Arc<AtomicBool>,
     /// Flag specifically for quitting due to ^C
     interrupt_flag: Arc<AtomicBool>,
+    /// PLAN §Phase 8.7.1 MUST 4: cancellation signal shared with every
+    /// `SearchBackend::run` invocation. The Ctrl-C handler clones and
+    /// fires it alongside `quit_flag` so the EverythingBackend's
+    /// between-hit `is_cancelled()` check and the `PostFilterSink`
+    /// short-circuit both see the signal — without this bridge,
+    /// Ctrl-C only reached LegacyWalker (which polls `quit_flag`).
+    cancel: CancellationToken,
 }
 
 impl WorkerState {
-    fn new(patterns: Vec<Regex>, config: Config) -> Self {
+    fn new(patterns: Vec<Regex>, config: Config) -> Result<Self> {
         let quit_flag = Arc::new(AtomicBool::new(false));
         let interrupt_flag = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        // env::current_dir() once per scan, shared via Arc — every hit
+        // would otherwise pay this syscall in DirEntry::normal.
+        let cwd = Arc::new(std::env::current_dir().map_err(|e| {
+            anyhow!(
+                "Could not determine current directory \
+                 (required to canonicalize hit paths). {e}"
+            )
+        })?);
 
-        Self {
+        Ok(Self {
             patterns,
             config,
+            cwd,
             quit_flag,
             interrupt_flag,
-        }
+            cancel,
+        })
     }
 
     fn build_overrides(&self, paths: &[PathBuf]) -> Result<Override> {
@@ -444,6 +394,7 @@ impl WorkerState {
         walker.run(|| {
             let patterns = &self.patterns;
             let config = &self.config;
+            let cwd: &Path = self.cwd.as_ref();
             let quit_flag = self.quit_flag.as_ref();
 
             let mut limit = 0x100;
@@ -454,6 +405,16 @@ impl WorkerState {
                 // Evenly distribute work between multiple receivers
                 limit = 1;
             }
+            // PLAN.md §Phase 7: streaming contract.
+            //
+            // For the LegacyWalker path, per-result `--exec` is achieved by
+            // pinning the BatchSender chunk to 1 above. When Phase 5 wires
+            // EverythingBackend into walk, the post-filter orchestrator MUST
+            // mirror this by constructing the IgnoreCache `AdaptiveDriver`
+            // with `ChunkPolicy { force_unit: !cmd.in_batch_mode(), .. }` —
+            // otherwise §4.8 will batch hits and `--exec` fires later than
+            // fd does. The contract is pinned by
+            // `scan::post_filter::ignore_cache::parallel::tests::force_unit_holds_chunk_at_one`.
             let mut tx = BatchSender::new(tx.clone(), limit);
 
             Box::new(move |entry| {
@@ -483,7 +444,7 @@ impl WorkerState {
                     }
                 }
                 let entry = match entry {
-                    Ok(e) => DirEntry::normal(e),
+                    Ok(e) => DirEntry::normal(e, cwd),
                     Err(ignore::Error::WithPath {
                         path,
                         err: inner_err,
@@ -495,7 +456,7 @@ impl WorkerState {
                             .ok()
                             .is_some_and(|m| m.file_type().is_symlink()) =>
                     {
-                        DirEntry::broken_symlink(path)
+                        DirEntry::broken_symlink(path, cwd)
                     }
                     Err(err) => {
                         return match tx.send(WorkerResult::Error(err)) {
@@ -614,16 +575,40 @@ impl WorkerState {
     }
 
     /// Perform the recursive scan.
+    ///
+    /// PLAN.md §Phase 8.5-D: routes each search root through
+    /// [`select_backend`] before traversal. Roots that land on a supported
+    /// Everything index drive the `EverythingBackend` → `PostFilterSink` →
+    /// `RawHitBatchSink` chain; roots that fall back (`--filesystem-walker`,
+    /// unsupported query, or runtime IPC failure) flow through the legacy
+    /// `ignore::WalkBuilder` exactly as before. Both producers share a
+    /// single `BatchSender`-fed channel so [`ReceiverBuffer`] is unaware
+    /// of which backend produced any given hit.
     fn scan(&self, paths: &[PathBuf]) -> Result<ExitCode> {
         let config = &self.config;
-        let walker = self.build_walker(paths)?;
 
-        if config.ls_colors.is_some() && config.is_printing() {
+        // PLAN §Phase 8.7.1 MUST 4: bridge Ctrl-C to the backend
+        // CancellationToken. Without this clone the EverythingBackend
+        // keeps polling the SDK until the query returns naturally; the
+        // cooperative `is_cancelled()` check in `backend.rs` then
+        // abandons the result list on the very next hit. The hidden
+        // message window (PLAN §Phase 5 B.4) would let
+        // `Everything_QueryW(TRUE)` itself be interrupted mid-flight;
+        // until that lands, between-hit cancellation is the strongest
+        // signal we have.
+        //
+        // Installed unconditionally — earlier this was gated on
+        // `ls_colors.is_some() && is_printing()`, which meant `--exec`,
+        // piped output and `--color=never` left the backend without a
+        // cancel signal (MUST 4 regression).
+        {
             let quit_flag = Arc::clone(&self.quit_flag);
             let interrupt_flag = Arc::clone(&self.interrupt_flag);
+            let cancel = self.cancel.clone();
 
             ctrlc::set_handler(move || {
                 quit_flag.store(true, Ordering::Relaxed);
+                cancel.cancel();
 
                 if interrupt_flag.fetch_or(true, Ordering::Relaxed) {
                     // Ctrl-C has been pressed twice, exit NOW
@@ -636,11 +621,41 @@ impl WorkerState {
         let (tx, rx) = bounded(2 * config.threads);
 
         let exit_code = thread::scope(|scope| {
-            // Spawn the receiver thread(s)
+            // Spawn the receiver thread(s) first so backend drivers can
+            // push to the bounded channel without blocking forever.
             let receiver = scope.spawn(|| self.receive(rx));
 
-            // Spawn the sender threads.
-            self.spawn_senders(walker, tx);
+            // Decide each root's backend up-front. The Everything path
+            // can still demote a root to LegacyWalker at runtime via IPC
+            // fallback (see `drive_everything_root`); that demotion is
+            // collected into `fallback_paths` and folded back into the
+            // legacy walker's path set below.
+            let (legacy_paths, fallback_paths) = self.run_everything_paths(paths, tx.clone());
+            let mut legacy_paths = legacy_paths;
+            legacy_paths.extend(fallback_paths);
+
+            if legacy_paths.is_empty() {
+                // No legacy roots: dropping `tx` lets the receiver finish
+                // immediately after the Everything stream completes.
+                drop(tx);
+            } else {
+                // Legacy walker covers all remaining roots in a single
+                // `WalkParallel` pass, matching pre-Phase-8.5 behaviour
+                // when no Everything routing happens (force_legacy=true
+                // or every root unindexed).
+                match self.build_walker(&legacy_paths) {
+                    Ok(walker) => self.spawn_senders(walker, tx),
+                    Err(err) => {
+                        // build_walker only fails on malformed --exclude
+                        // patterns; surface as a worker error so the
+                        // receiver still drains cleanly.
+                        let mut sender = BatchSender::new(tx, 1);
+                        let _ = sender.send(WorkerResult::Error(ignore::Error::from(
+                            std::io::Error::other(format!("{err:#}")),
+                        )));
+                    }
+                }
+            }
 
             receiver.join().unwrap()
         });
@@ -651,6 +666,289 @@ impl WorkerState {
             Ok(exit_code)
         }
     }
+
+    /// PLAN.md §Phase 8.5-D dispatcher: classify each user-supplied path,
+    /// drive every Everything-routed root sequentially through the SDK
+    /// mutex, and partition out (a) the paths the user already asked to
+    /// run on LegacyWalker (`--filesystem-walker`, unsupported query, or
+    /// the path is on a non-indexed volume) and (b) the paths whose
+    /// Everything invocation failed with `EverythingError::is_unavailable`
+    /// (silent fallback per PLAN R1).
+    ///
+    /// Returns `(initial_legacy_paths, runtime_fallback_paths)`. Both
+    /// vectors are unioned by the caller before invoking the legacy
+    /// walker so a single `WalkParallel` pass covers them.
+    fn run_everything_paths(
+        &self,
+        paths: &[PathBuf],
+        tx: Sender<Batch>,
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let config = &self.config;
+
+        // PLAN.md §Phase 8.7.1 MUST 3: the `FDE_BACKEND=everything`
+        // opt-in gate is gone. Routing is decided by the
+        // `EverythingVolumeIndexProbe` alone — unindexed paths cleanly
+        // fall back to LegacyWalker, indexed ones drive
+        // EverythingBackend. The semantic parity gaps that originally
+        // kept the gate (directory-symlink type, hidden-by-name
+        // ancestors, size-filter on reparse points) were closed by
+        // MUST 1 + MUST 2.
+        //
+        // Test-only escape hatch: `FDE_TEST_FORCE_LEGACY=1` shorts the
+        // Everything path entirely, mirroring `--filesystem-walker`.
+        // The integration harness in `tests/testenv` sets it on every
+        // invocation so `cargo test --test tests` stays deterministic
+        // on dev machines where Everything has cached the tempdir
+        // parent but not the freshly-created leaf entries. NOT consumed
+        // anywhere production; without it MUST 3 would trade an opt-in
+        // gate for an opt-out flake.
+        if std::env::var_os("FDE_TEST_FORCE_LEGACY").is_some() {
+            return (paths.to_vec(), Vec::new());
+        }
+
+        // PLAN.md §Phase 8.6 / §Phase 8 §8g: when the test harness sets
+        // `FDE_TEST_MOCK_HITS`, swap `EverythingBackend` for a
+        // deterministic text-file replay so `tests/mock_e2e.rs` can
+        // verify the dispatcher and pipeline wiring without depending on
+        // a running Everything service. A parse error surfaces as a
+        // worker error and falls every root back to LegacyWalker (so
+        // bad fixtures don't silently zero results).
+        let mock_backend = match mock_injection::try_load_from_env() {
+            Ok(m) => m,
+            Err(err) => {
+                let mut sender = BatchSender::new(tx.clone(), 1);
+                let _ = sender.send(WorkerResult::Error(ignore::Error::from(
+                    std::io::Error::other(format!("{err:#}")),
+                )));
+                return (paths.to_vec(), Vec::new());
+            }
+        };
+
+        // PLAN.md §Phase 8.7: pick a probe. The real
+        // `EverythingVolumeIndexProbe` issues a count-only
+        // `path:"<root>"` query and routes to Legacy on either an
+        // IPC error or a zero-count response — so a tempdir that
+        // Everything hasn't seen yet falls through to the legacy
+        // walker and still produces results.
+        //
+        // Mock-injection sessions force `AssumeIndexedProbe`: the test
+        // harness uses tempdirs that the real probe would correctly
+        // route to Legacy, which would skip the mock backend entirely
+        // and defeat the whole point of `FDE_TEST_MOCK_HITS`. Per-test
+        // env isolation in `tests/mock_e2e.rs` keeps this from leaking
+        // into production binaries.
+        let assume_probe = AssumeIndexedProbe;
+        let real_probe = EverythingVolumeIndexProbe;
+        let probe: &dyn VolumeIndexProbe = if mock_backend.is_some() {
+            &assume_probe
+        } else {
+            &real_probe
+        };
+
+        // Build TranslationInput from Config. The lifetime ties to
+        // `config`, which lives for the entire scan, so this is safe to
+        // pass to `select_backend` for every root.
+        let translation_input = self.translation_input();
+
+        let mut initial_legacy: Vec<PathBuf> = Vec::new();
+        let mut runtime_fallback: Vec<PathBuf> = Vec::new();
+
+        for (idx, path) in paths.iter().enumerate() {
+            if self.quit_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Use the canonicalized form so EverythingBackend's
+            // `path:"<root>"` modifier matches the index entries.
+            // `config.search_roots` is built in lock-step with `paths`
+            // in `main.rs::run`, so the same `idx` works for both.
+            let canonical = config
+                .search_roots
+                .get(idx)
+                .map(|sr| sr.canonical.clone())
+                .unwrap_or_else(|| path.clone());
+
+            let choice = self.classify_backend(&translation_input, canonical, probe);
+            match choice {
+                BackendChoice::Legacy { .. } => initial_legacy.push(path.clone()),
+                BackendChoice::Everything(query) => {
+                    // Mock injection (PLAN §8g) wins over EverythingBackend
+                    // when both are eligible — that's the whole point of
+                    // the env var. force_legacy is still honoured because
+                    // `classify_backend` would have returned Legacy before
+                    // we got here.
+                    let outcome = match mock_backend.as_ref() {
+                        Some(mock) => self.drive_backend_root(mock, &query, path, tx.clone()),
+                        None => self.drive_backend_root(
+                            &EverythingBackend::new(),
+                            &query,
+                            path,
+                            tx.clone(),
+                        ),
+                    };
+                    match outcome {
+                        EverythingOutcome::Done => {}
+                        EverythingOutcome::Fallback => runtime_fallback.push(path.clone()),
+                        EverythingOutcome::HardError(err) => {
+                            // Surface the structured error to the receiver
+                            // — it'll be printed under `--show-errors`,
+                            // and exit status remains non-zero via the
+                            // normal `WorkerResult::Error` channel.
+                            let mut sender = BatchSender::new(tx.clone(), 1);
+                            let _ = sender.send(WorkerResult::Error(ignore::Error::from(
+                                std::io::Error::other(err),
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        (initial_legacy, runtime_fallback)
+    }
+
+    /// Run a [`SearchBackend`] (production: [`EverythingBackend`];
+    /// `tests/mock_e2e.rs` swap-in: [`MockHitFileBackend`]) for one
+    /// search root. Threads hits through a Phase 3 `Pipeline` built
+    /// from `Config` (`pipeline_builder::build_pipeline`) into a
+    /// `RawHitBatchSink`, which writes `WorkerResult::Entry(DirEntry)`
+    /// to the shared channel. Returns:
+    ///
+    /// - `Done` — query completed (possibly cancelled mid-stream by
+    ///   `--max-results` or downstream SIGPIPE; both are fine — the
+    ///   pipeline already forwarded as many hits as the user wanted).
+    /// - `Fallback` — Everything itself is unreachable (IPC error). The
+    ///   caller re-runs the root on the legacy walker. This branch is
+    ///   never taken by [`MockHitFileBackend`] (it doesn't surface
+    ///   `EverythingError`).
+    /// - `HardError` — backend is reachable but a non-cancel, non-IPC
+    ///   error fired (programmer bug, malformed mock fixture, or
+    ///   pattern build failure).
+    fn drive_backend_root(
+        &self,
+        backend: &dyn SearchBackend,
+        query: &BackendQuery,
+        current_root: &Path,
+        tx: Sender<Batch>,
+    ) -> EverythingOutcome {
+        let config = &self.config;
+        // PLAN §Phase 8.7.1 MUST 4: reuse the shared cancel token so
+        // the Ctrl-C handler installed in `scan` can interrupt the
+        // running backend. A fresh token here would silently swallow
+        // every cancellation signal — backend keeps streaming until
+        // SDK exhaustion.
+        let cancel = self.cancel.clone();
+
+        // `--exec` per-result mode needs chunk=1 so jobs see hits as
+        // they arrive; everything else gets the default chunk. Matches
+        // `spawn_senders` (lines 379-386) for the legacy path.
+        let limit = match config.command.as_ref() {
+            Some(cmd) if !cmd.in_batch_mode() && config.threads > 1 => 1,
+            _ => 0x100,
+        };
+        let batch_sender = BatchSender::new(tx, limit);
+
+        // Anchor the pipeline to THIS root, not `paths.first()`. With
+        // multiple search roots and a backend-routed scan, sharing the
+        // first root's anchor across every root would make
+        // `ExcludeFilter`'s `OverrideBuilder` match `-E` patterns
+        // against the wrong base — e.g. `fde -E '*.tmp' rootA rootB`
+        // would leak `rootB\a.tmp` on the Everything path while the
+        // legacy walker drops it.
+        let pipeline = match build_pipeline(config, current_root, &cancel) {
+            Ok(p) => p,
+            Err(err) => return EverythingOutcome::HardError(format!("{err:#}")),
+        };
+
+        let mut downstream = RawHitBatchSink::new(batch_sender);
+        let mut sink = PostFilterSink::new(pipeline, &mut downstream, &cancel);
+
+        let result = backend.run(query, &mut sink, &cancel);
+
+        // Drain any buffered hits from `prune` etc. — but only when the
+        // backend completed cleanly or was cancelled. A hard backend
+        // error means the result set is partial / corrupted, and
+        // emitting buffered hits would mix partial success with the
+        // error report; LegacyWalker would have produced nothing in
+        // that case. Cancelled still finalizes so anything queued up to
+        // the cancel boundary is forwarded.
+        match &result {
+            Ok(()) | Err(BackendError::Cancelled) => {
+                if let Err(err) = sink.finalize() {
+                    // finalize() only fails on Cancelled; that's not a fault.
+                    debug_assert!(matches!(err, BackendError::Cancelled));
+                }
+            }
+            Err(BackendError::Other(_)) => {
+                // Drop buffered hits without flushing.
+            }
+        }
+
+        match result {
+            Ok(()) | Err(BackendError::Cancelled) => EverythingOutcome::Done,
+            Err(BackendError::Other(err)) => {
+                if let Some(ev) = err.downcast_ref::<EverythingError>()
+                    && ev.is_unavailable()
+                {
+                    EverythingOutcome::Fallback
+                } else {
+                    EverythingOutcome::HardError(format!("{err:#}"))
+                }
+            }
+        }
+    }
+
+    fn classify_backend(
+        &self,
+        input: &TranslationInput<'_>,
+        canonical: PathBuf,
+        probe: &dyn VolumeIndexProbe,
+    ) -> BackendChoice {
+        let mut choices = select_backend(vec![canonical], input, probe, self.config.force_legacy);
+        // `select_backend` always returns one choice per input path.
+        choices
+            .pop()
+            .expect("select_backend yields one choice per input")
+    }
+
+    fn translation_input(&self) -> TranslationInput<'_> {
+        let config = &self.config;
+        TranslationInput {
+            pattern: &config.raw_pattern,
+            glob: config.pattern_is_glob,
+            fixed_strings: config.pattern_is_fixed_strings,
+            exact: config.pattern_is_exact,
+            and_patterns: &config.raw_and_patterns,
+            full_path: config.full_path_base.is_some(),
+            case_sensitive: config.case_sensitive,
+            file_types: config.file_types.as_ref(),
+            // Extensions / size / time hints are CURRENTLY consumed only
+            // for backend selection (whether a query is translatable).
+            // For 8.5 we err on "translation must succeed" — the existing
+            // tests/tests.rs assertions cover the post-filter side, and
+            // every CLI-level filter is re-applied in `build_pipeline`
+            // regardless of what gets pushed down. Wiring the actual
+            // push-down values is Phase 5+ optimisation territory.
+            extensions: &[],
+            size_filters: &config.size_constraints,
+            time_filters: &config.time_constraints,
+            max_depth: config.max_depth,
+            max_results: config.max_results,
+        }
+    }
+}
+
+/// Outcome of one EverythingBackend invocation on a single search root.
+enum EverythingOutcome {
+    /// Query produced hits (possibly cancelled mid-stream, which is OK).
+    Done,
+    /// Everything itself is unavailable (`EVERYTHING_ERROR_IPC` family).
+    /// PLAN R1 silent-fallback contract: caller re-runs this root via
+    /// LegacyWalker.
+    Fallback,
+    /// Non-recoverable error — surfaces to the receiver as a
+    /// `WorkerResult::Error`.
+    HardError(String),
 }
 
 fn search_str_for_entry<'a>(
@@ -683,7 +981,7 @@ fn search_str_for_entry<'a>(
 /// jobs in parallel from a given command line and the discovered paths. Otherwise, each
 /// path will simply be written to standard output.
 pub fn scan(paths: &[PathBuf], patterns: Vec<Regex>, config: Config) -> Result<ExitCode> {
-    WorkerState::new(patterns, config).scan(paths)
+    WorkerState::new(patterns, config)?.scan(paths)
 }
 
 #[cfg(test)]

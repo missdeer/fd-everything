@@ -15,6 +15,10 @@ fn replace_path_separator(path: &str, new_path_separator: &str) -> String {
 
 // TODO: this function is performance critical and can probably be optimized
 pub fn print_entry<W: Write>(stdout: &mut W, entry: &DirEntry, config: &Config) -> io::Result<()> {
+    // PLAN.md §2.X: hyperlink target uses the absolute raw_path (terminals
+    // need a fully-qualified file:// URL to open it), display text uses the
+    // projected form. See PathUrl::new — it canonicalizes again internally,
+    // but raw_path is already absolute so that call is effectively a no-op.
     let mut has_hyperlink = false;
     if config.hyperlink
         && let Some(url) = PathUrl::new(entry.path())
@@ -23,12 +27,15 @@ pub fn print_entry<W: Write>(stdout: &mut W, entry: &DirEntry, config: &Config) 
         has_hyperlink = true;
     }
 
+    let projector = config.path_projector();
+    let projected = projector.project_for_output(entry.path());
+
     if let Some(ref format) = config.format {
-        print_entry_format(stdout, entry, config, format)?;
+        print_entry_format(stdout, entry, config, &projected, format)?;
     } else if let Some(ref ls_colors) = config.ls_colors {
-        print_entry_colorized(stdout, entry, config, ls_colors)?;
+        print_entry_colorized(stdout, entry, config, &projected, ls_colors)?;
     } else {
-        print_entry_uncolorized(stdout, entry, config)?;
+        print_entry_uncolorized(stdout, entry, config, &projected)?;
     };
 
     if has_hyperlink {
@@ -52,7 +59,7 @@ fn print_trailing_slash<W: Write>(
     config: &Config,
     style: Option<&Style>,
 ) -> io::Result<()> {
-    if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+    if entry.is_directory_for_display() {
         write!(
             stdout,
             "{}",
@@ -68,14 +75,12 @@ fn print_trailing_slash<W: Write>(
 // TODO: this function is performance critical and can probably be optimized
 fn print_entry_format<W: Write>(
     stdout: &mut W,
-    entry: &DirEntry,
+    _entry: &DirEntry,
     config: &Config,
+    projected: &std::path::Path,
     format: &FormatTemplate,
 ) -> io::Result<()> {
-    let output = format.generate(
-        entry.stripped_path(config),
-        config.path_separator.as_deref(),
-    );
+    let output = format.generate(projected, config.path_separator.as_deref());
     // TODO: support writing raw bytes on unix?
     let s = output.to_string_lossy();
     write!(
@@ -90,10 +95,11 @@ fn print_entry_colorized<W: Write>(
     stdout: &mut W,
     entry: &DirEntry,
     config: &Config,
+    projected: &std::path::Path,
     ls_colors: &LsColors,
 ) -> io::Result<()> {
     let mut offset = 0;
-    let path = entry.stripped_path(config);
+    let path = projected;
     let path_str = path.to_string_lossy();
 
     if let Some(parent) = path.parent() {
@@ -143,10 +149,9 @@ fn print_entry_uncolorized_base<W: Write>(
     stdout: &mut W,
     entry: &DirEntry,
     config: &Config,
+    projected: &std::path::Path,
 ) -> io::Result<()> {
-    let path = entry.stripped_path(config);
-
-    let mut path_string = path.to_string_lossy();
+    let mut path_string = projected.to_string_lossy();
     if let Some(ref separator) = config.path_separator {
         *path_string.to_mut() = replace_path_separator(&path_string, separator);
     }
@@ -160,8 +165,9 @@ fn print_entry_uncolorized<W: Write>(
     stdout: &mut W,
     entry: &DirEntry,
     config: &Config,
+    projected: &std::path::Path,
 ) -> io::Result<()> {
-    print_entry_uncolorized_base(stdout, entry, config)
+    print_entry_uncolorized_base(stdout, entry, config, projected)
 }
 
 #[cfg(unix)]
@@ -169,14 +175,15 @@ fn print_entry_uncolorized<W: Write>(
     stdout: &mut W,
     entry: &DirEntry,
     config: &Config,
+    projected: &std::path::Path,
 ) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     if config.interactive_terminal || config.path_separator.is_some() {
-        print_entry_uncolorized_base(stdout, entry, config)
+        print_entry_uncolorized_base(stdout, entry, config, projected)
     } else {
         // Piped output: raw bytes so invalid UTF-8 filenames reach downstream tools intact.
-        stdout.write_all(entry.stripped_path(config).as_os_str().as_bytes())?;
+        stdout.write_all(projected.as_os_str().as_bytes())?;
         print_trailing_slash(stdout, entry, config, None)
     }
 }

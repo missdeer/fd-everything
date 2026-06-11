@@ -20,10 +20,10 @@ use crate::filter::SizeFilter;
 
 #[derive(Parser)]
 #[command(
-    name = "fd",
+    name = "fde",
     version,
-    about = "A program to find entries in your filesystem with regex and glob based matching. By default, fd respects gitignore rules, ignores hidden directories, and is case insensitive.",
-    after_long_help = "Bugs can be reported on GitHub: https://github.com/sharkdp/fd/issues",
+    about = "fde is a Windows-only fork of fd that uses the Everything index as its search core, while preserving fd's CLI, ignore-file semantics, and output format.",
+    after_long_help = "Upstream fd bugs: https://github.com/sharkdp/fd/issues",
     max_term_width = 98,
     args_override_self = true,
     group(ArgGroup::new("execs").args(&["exec", "exec_batch", "list_details"]).conflicts_with_all(&[
@@ -686,6 +686,21 @@ pub struct Opts {
     #[cfg(any(unix, windows))]
     #[arg(long, aliases(&["mount", "xdev"]), hide_short_help = true, long_help)]
     pub one_file_system: bool,
+
+    /// Force the legacy filesystem walker (the upstream fd traversal). By
+    /// default fde routes through the Everything index where the search root
+    /// lies on an indexed NTFS volume and falls back to the legacy walker
+    /// otherwise (PLAN.md §Phase 6 selection rules). This flag forces every
+    /// search root onto the legacy walker — useful for diffing fde against
+    /// upstream fd, for searching paths not covered by the Everything index,
+    /// or as an escape hatch when the Everything service is unavailable.
+    #[arg(
+        long,
+        hide_short_help = true,
+        help = "Force the upstream-fd filesystem walker (skip the Everything index)",
+        long_help
+    )]
+    pub filesystem_walker: bool,
 
     #[cfg(feature = "completions")]
     #[arg(long, hide = true, exclusive = true)]

@@ -1,3 +1,20 @@
 target/
 /autocomplete/
 **/*.rs.bk
+# Local test scratch dir per CLAUDE.md "use ${project_root}/tmp" rule.
+/tmp/
+# MSYS / Cygwin shell crash dumps.
+*.stackdump
+# PLAN §Phase 9 / R13: the Everything DLL is never redistributed. The
+# vendored `Everything-SDK/` headers + import libs are required to build;
+# the runtime DLL must come from the user's Everything installation.
+/redist/Everything64.dll
+# Claude Code local settings (machine-specific permissions, not portable).
+/.claude/
+# Everything-SDK: vendor only the headers (bindgen input) and import
+# libs (link target). The runtime DLLs are not redistributed per PLAN
+# §Phase 9 / R13; the SDK's demo apps, IPC protocol header, VS project
+# files, and C source are not used by the Rust build.
+/Everything-SDK/*
+!/Everything-SDK/include/
+!/Everything-SDK/lib/

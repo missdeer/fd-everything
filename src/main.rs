@@ -1,3 +1,29 @@
+#[cfg(not(windows))]
+compile_error!(
+    "fde is Windows-only. The Everything-SDK search backend requires Windows. Use upstream `fd` (sharkdp/fd) on other platforms."
+);
+
+// PLAN.md §8i: with the lib target added (`src/lib.rs`), Cargo only
+// propagates `build.rs`'s `cargo:rustc-link-lib=...` through the lib's
+// compilation. main.rs still includes `mod scan;` and therefore
+// compiles its own copy of the Everything SDK FFI calls — those need
+// the bin's link step to also pull in the SDK import lib. The lib name
+// is per-arch so this mirrors `build.rs`'s arch→lib mapping; without
+// the per-arch split, i686 / aarch64 Windows builds would request
+// `Everything64.lib` and fail to link.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+#[link(name = "Everything64", kind = "dylib")]
+unsafe extern "C" {}
+#[cfg(all(target_os = "windows", target_arch = "x86"))]
+#[link(name = "Everything32", kind = "dylib")]
+unsafe extern "C" {}
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+#[link(name = "EverythingARM64", kind = "dylib")]
+unsafe extern "C" {}
+#[cfg(all(target_os = "windows", target_arch = "arm"))]
+#[link(name = "EverythingARM", kind = "dylib")]
+unsafe extern "C" {}
+
 mod cli;
 mod config;
 mod dir_entry;
@@ -12,6 +38,7 @@ mod hyperlink;
 mod output;
 mod regex_helper;
 mod sanitize;
+mod scan;
 mod walk;
 
 use std::env;
@@ -34,6 +61,7 @@ use crate::filetypes::FileTypes;
 use crate::filter::OwnerFilter;
 use crate::filter::TimeFilter;
 use crate::regex_helper::{pattern_has_uppercase_char, pattern_matches_strings_with_leading_dot};
+use crate::scan::path_projection::SearchRoot;
 
 // We use jemalloc for performance reasons, see https://github.com/sharkdp/fd/pull/481
 // FIXME: re-enable jemalloc on macOS, see comment in Cargo.toml file for more infos
@@ -99,7 +127,19 @@ fn run() -> Result<ExitCode> {
         .map(|pat| build_pattern_regex(pat, &opts))
         .collect::<Result<Vec<String>>>()?;
 
-    let config = construct_config(opts, &pattern_regexps)?;
+    // PLAN.md §Phase 2: build search-root display pairs. After
+    // `set_working_dir`, env::current_dir() is the effective base, so
+    // `path_absolute_form` gives us the canonical absolute form to match
+    // hits against. The user-supplied path stays as the display form.
+    let search_roots: Vec<SearchRoot> = search_paths
+        .iter()
+        .map(|p| SearchRoot {
+            canonical: filesystem::path_absolute_form(p).unwrap_or_else(|_| p.clone()),
+            display: p.clone(),
+        })
+        .collect();
+
+    let config = construct_config(opts, &pattern_regexps, search_roots)?;
 
     ensure_use_hidden_option_for_leading_dot_pattern(&config, &pattern_regexps)?;
 
@@ -245,7 +285,11 @@ fn check_path_separator_length(path_separator: Option<&str>) -> Result<()> {
     }
 }
 
-fn construct_config(mut opts: Opts, pattern_regexps: &[String]) -> Result<Config> {
+fn construct_config(
+    mut opts: Opts,
+    pattern_regexps: &[String],
+    search_roots: Vec<SearchRoot>,
+) -> Result<Config> {
     // The search will be case-sensitive if the command line flag is set or
     // if any of the patterns has an uppercase character (smart case).
     let case_sensitive = !opts.ignore_case
@@ -388,7 +432,19 @@ fn construct_config(mut opts: Opts, pattern_regexps: &[String]) -> Result<Config
         actual_path_separator,
         max_results: opts.max_results(),
         strip_cwd_prefix: opts.strip_cwd_prefix(|| !(opts.null_separator || has_command)),
+        absolute_paths: opts.absolute_path,
+        search_roots: Arc::new(search_roots),
         ignore_contain: opts.ignore_contain,
+        force_legacy: opts.filesystem_walker,
+        // PLAN.md §Phase 8.5-A: keep the unprocessed pattern strings so the
+        // Phase 6 translation layer can run inside `walk::scan`. clap's
+        // `conflicts_with` guarantees at most one of glob/fixed/exact, so
+        // the three bools are mutually exclusive by construction.
+        raw_pattern: opts.pattern.clone(),
+        raw_and_patterns: opts.exprs.clone().unwrap_or_default(),
+        pattern_is_glob: opts.glob,
+        pattern_is_fixed_strings: opts.fixed_strings,
+        pattern_is_exact: opts.exact,
     })
 }
 

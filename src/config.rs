@@ -9,6 +9,7 @@ use crate::filetypes::FileTypes;
 use crate::filter::OwnerFilter;
 use crate::filter::{SizeFilter, TimeFilter};
 use crate::fmt::FormatTemplate;
+use crate::scan::path_projection::{PathProjector, SearchRoot};
 
 /// Configuration options for *fd*.
 pub struct Config {
@@ -128,16 +129,66 @@ pub struct Config {
     /// Whether or not to strip the './' prefix for search results
     pub strip_cwd_prefix: bool,
 
+    /// `--absolute-path`. Consumed by `PathProjector` to short-circuit
+    /// display projection and emit `raw_path` verbatim (PLAN.md §Phase 2).
+    pub absolute_paths: bool,
+
+    /// Phase 2: search roots paired with their user-given display form.
+    /// `PathProjector` consults this to translate a hit's absolute
+    /// `raw_path` back into the relative form fd prints. `Arc` so the
+    /// receiver/sender threads cheap-clone instead of deep-copying.
+    pub search_roots: Arc<Vec<SearchRoot>>,
+
     /// Whether or not to use hyperlinks on paths
     pub hyperlink: bool,
 
     /// Names that should stop traversal down their parent. (e.g. https://bford.info/cachedir/).
     pub ignore_contain: Vec<String>,
+
+    /// PLAN.md §Phase 6 / §Phase 8: when true (CLI `--filesystem-walker`),
+    /// force every search root through the upstream-fd legacy walker even if
+    /// the Everything index would otherwise cover it. Consumed by
+    /// `scan::backend::everything::selection::select_backend` (the
+    /// `force_legacy` parameter) inside `walk::scan` (PLAN §Phase 8.5
+    /// routing slice).
+    pub force_legacy: bool,
+
+    /// PLAN.md §Phase 8.5-A: raw user pattern, kept verbatim so the Phase 6
+    /// translation layer (`scan::backend::everything::query::translate`) can
+    /// drive Everything's own regex/glob engines. The compiled `Vec<Regex>`
+    /// in `walk::scan` is built from this same string but with
+    /// glob/exact/fixed-strings transforms baked in — Everything wants the
+    /// unprocessed input.
+    pub raw_pattern: String,
+
+    /// PLAN.md §Phase 8.5-A: raw `--and` patterns (one per occurrence),
+    /// kept verbatim for the same reason as `raw_pattern`.
+    pub raw_and_patterns: Vec<String>,
+
+    /// PLAN.md §Phase 8.5-A: pattern interpretation flags forwarded as-is
+    /// to the Phase 6 translation layer. The CLI guarantees at most one of
+    /// `glob`/`fixed_strings`/`exact` is set; we mirror the tri-state with
+    /// three bools to avoid leaking a translation-private enum into
+    /// `Config`.
+    pub pattern_is_glob: bool,
+    pub pattern_is_fixed_strings: bool,
+    pub pattern_is_exact: bool,
 }
 
 impl Config {
     /// Check whether results are being printed.
     pub fn is_printing(&self) -> bool {
         self.command.is_none()
+    }
+
+    /// Build a fresh `PathProjector` that borrows from this `Config`.
+    /// Cheap — no allocations beyond the projector struct itself, and
+    /// `roots` is already pre-sorted at scan start (PLAN.md §Phase 2).
+    pub fn path_projector(&self) -> PathProjector<'_> {
+        PathProjector::new(
+            self.search_roots.as_slice(),
+            self.absolute_paths,
+            self.strip_cwd_prefix,
+        )
     }
 }

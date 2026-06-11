@@ -1,3 +1,38 @@
+# fd-everything fork
+
+The `fd-everything` (`fde`) fork lives on the `everything` branch and tracks
+upstream `fd` from commit [`25461e5`](https://github.com/sharkdp/fd/commit/25461e5)
+(crate version `10.4.2`). Upstream merges land on the `master` branch first;
+`everything` rebases on top so the fork-specific commits stay at the tip.
+See `PLAN.md` for the phased design log; the user-visible difference list
+lives in `README.md`.
+
+## Phase 8.7.1 (2026-06-11) — Default routing through Everything
+
+- Removed the `FDE_BACKEND=everything` opt-in gate. Default routing is
+  now decided by `EverythingVolumeIndexProbe` alone: indexed roots drive
+  `EverythingBackend`, unindexed roots fall back to the legacy walker.
+  `--filesystem-walker` remains as the user-facing escape hatch.
+- Fixed directory-symlink classification: reparse-point entries are no
+  longer reported as folders (`--type l` now prints `link`, not `link\`).
+- Tightened `HiddenByNameFilter` to scan every search-root-to-leaf path
+  component, matching `ignore::WalkBuilder`'s descend-skip semantics.
+- Tightened `SizeConstraints` to drop reparse-point hits, matching
+  `walk.rs::is_file()`'s symlink-follow semantics for `--size`.
+- Bridged Ctrl-C to the Everything backend via a shared
+  `CancellationToken`: SIGINT now interrupts the running query at the
+  next hit boundary instead of waiting for natural completion.
+
+## Phase 8.7 (2026-06-11) — VolumeIndexProbe
+
+- Added `EverythingVolumeIndexProbe`: a count-only `path:"<root>"` probe
+  that routes search roots Everything hasn't indexed (typical of freshly-
+  created tempdirs, non-NTFS volumes, or when the Everything service is
+  down) to the legacy walker instead of returning empty results.
+- Fixed `EverythingBackend` emitting the search root entry itself for
+  empty / root-matching patterns; root depth-0 hits are now skipped to
+  match `ignore::WalkBuilder` semantics.
+
 # Unreleased
 
 ## Features

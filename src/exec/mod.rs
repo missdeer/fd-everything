@@ -15,7 +15,7 @@ use crate::exit_codes::{ExitCode, merge_exitcodes};
 use crate::fmt::{FormatTemplate, Token};
 
 use self::command::{execute_commands, handle_cmd_error};
-pub use self::job::{batch, job};
+pub(crate) use self::job::{batch, job};
 
 /// Execution mode of the command
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,15 @@ impl CommandSet {
         })
     }
 
+    /// `true` when the user passed `--exec-batch` (one argv per chunk of
+    /// hits); `false` for `--exec` (one argv per hit).
+    ///
+    /// PLAN.md §Phase 7 streaming contract: the orchestrator that drives
+    /// the post-filter `AdaptiveDriver` MUST pass
+    /// `ChunkPolicy::force_unit = !in_batch_mode()`. Pinned by
+    /// `scan::post_filter::ignore_cache::parallel::tests::force_unit_holds_chunk_at_one`
+    /// (chunk=1 invariant) and the LegacyWalker mirror in
+    /// `walk::WorkerState::spawn_senders` (BatchSender limit=1).
     pub fn in_batch_mode(&self) -> bool {
         self.mode == ExecutionMode::Batch
     }
@@ -433,6 +442,26 @@ mod tests {
     #[test]
     fn command_set_no_args() {
         assert!(CommandSet::new(vec![vec!["echo"], vec![]]).is_err());
+    }
+
+    /// PLAN.md §Phase 7 streaming contract — pin: `--exec` is per-result,
+    /// `--exec-batch` is batched. `in_batch_mode()` is the *sole* signal
+    /// the post-filter orchestrator (Phase 5+) uses to set
+    /// `ChunkPolicy::force_unit`. If the mode plumbing ever changes shape
+    /// (e.g. mode moved off CommandSet, or a third mode added), this test
+    /// fails loudly so the §4.8 wiring gets re-examined before merge.
+    #[test]
+    fn in_batch_mode_drives_streaming_contract() {
+        let per_result = CommandSet::new(vec![vec!["echo", "{}"]]).unwrap();
+        assert!(
+            !per_result.in_batch_mode(),
+            "--exec must report per-result so AdaptiveDriver gets force_unit=true",
+        );
+        let batched = CommandSet::new_batch(vec![vec!["echo", "{}"]]).unwrap();
+        assert!(
+            batched.in_batch_mode(),
+            "--exec-batch must report batched so AdaptiveDriver lets chunks grow",
+        );
     }
 
     #[test]
