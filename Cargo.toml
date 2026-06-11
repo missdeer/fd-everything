@@ -27,7 +27,7 @@ repository = "sharkdp/fd"
 repository = "sharkdp/fd"
 
 [[bin]]
-name = "fd"
+name = "fde"
 path = "src/main.rs"
 
 [dependencies]
@@ -46,6 +46,11 @@ crossbeam-channel = "0.5.15"
 clap_complete = {version = "4.6.5", optional = true}
 faccess = "0.2.4"
 jiff = "0.2.27"
+# Phase 4 (PLAN.md §4.1, §4.8): IgnoreCache concurrent map + rayon adaptive
+# parallel post-filter evaluation. dashmap chosen over Mutex<HashMap> per
+# §4.1; rayon chosen over hand-rolled threadpool per §4.8.
+dashmap = "6.1"
+rayon = "1.10"
 
 [dependencies.clap]
 version = "4.6.1"
@@ -62,6 +67,24 @@ nix = { version = "0.31.1", default-features = false, features = ["signal", "use
 [target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
 libc = "0.2"
 
+# Windows-only deps. Hosts Everything-SDK FFI bindings (Phase 5) and Win32
+# wrappers for §3.3 (same-filesystem volume queries).
+[target.'cfg(windows)'.dependencies]
+# Phase 5 (PLAN.md §Phase 5): SetLastError/GetLastError surface around the
+# Everything SDK, plus the Win32 types we layer on top of the bindgen output
+# (HWND, FILETIME, LARGE_INTEGER). Kept separate from bindgen-generated types —
+# the FFI module re-exports its own type aliases when crossing the boundary.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Phase 5 (PLAN.md §Phase 5): generates `Everything_*` / `EVERYTHING_*` bindings
+# from Everything-SDK/include/Everything.h at build time. Allowlisted to those
+# symbols so the OUT_DIR file stays small and avoids dragging the entire
+# <windows.h> graph into our crate.
+bindgen = "0.71"
+
 # FIXME: Re-enable jemalloc on macOS
 # jemalloc is currently disabled on macOS due to a bug in jemalloc in combination with macOS
 # Catalina. See https://github.com/sharkdp/fd/issues/498 for details.
@@ -75,6 +98,15 @@ diff = "0.1"
 tempfile = "3.27"
 filetime = "0.2"
 test-case = "3.3"
+# PLAN.md §Phase 8 §6 / §8i: post-filter pipeline microbenchmarks. Default
+# features include rayon for cross-platform thread-pool execution; we don't
+# need html-reports (saves ~30 transitive crates), criterion still produces
+# a usable CLI report and JSON for offline analysis.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "post_filter"
+harness = false
 
 [profile.dev]
 debug = "line-tables-only"

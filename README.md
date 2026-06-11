@@ -1,9 +1,27 @@
-# fd
+# fd-everything (fde)
 
 [![CICD](https://github.com/sharkdp/fd/actions/workflows/CICD.yml/badge.svg)](https://github.com/sharkdp/fd/actions/workflows/CICD.yml)
 [![Version info](https://img.shields.io/crates/v/fd-find.svg)](https://crates.io/crates/fd-find)
 [[中文](https://github.com/cha0ran/fd-zh)]
 [[한국어](https://github.com/spearkkk/fd-kor)]
+
+> **fd-everything (`fde`)** is a Windows-only fork of [`fd`](https://github.com/sharkdp/fd)
+> that drives searches through [voidtools' Everything](https://www.voidtools.com/)
+> index. The classic `fd` CLI surface is preserved unchanged; the new binary
+> is named `fde` so it can sit alongside `fd` without conflict.
+>
+> * **Platform**: Windows only. The codebase has a `#[cfg(not(windows))] compile_error!`
+>   gate; cross-compiling on other targets is a non-goal.
+> * **Runtime dependency**: [Everything ≥ 1.4.1](https://www.voidtools.com/downloads/).
+>   The service must be running and have finished its initial index load. When
+>   Everything is unavailable the dispatcher silently falls back to the legacy
+>   walker per PLAN R1, so commands keep working — just without the index speed-up.
+> * **Binary name**: `fde` (upstream `fd` is `fd`). Cargo target name is
+>   `fde`; on disk you get `fde.exe`.
+> * **Source baseline**: forked from upstream `fd` at commit
+>   [`25461e5`](https://github.com/sharkdp/fd/commit/25461e5) (Cargo.toml
+>   version `10.4.2`). Upstream rebase is done on the `master` branch; the
+>   fork's working branch is `everything`.
 
 `fd` is a program to find entries in your filesystem.
 It is a simple, fast and user-friendly alternative to [`find`](https://www.gnu.org/software/findutils/).
@@ -11,6 +29,56 @@ While it does not aim to support all of `find`'s powerful functionality, it prov
 (opinionated) defaults for a majority of use cases.
 
 [Installation](#installation) • [How to use](#how-to-use) • [Troubleshooting](#troubleshooting)
+
+## Differences from upstream `fd`
+
+`fde` routes every search through the Everything backend by default; pass
+`--filesystem-walker` to force the legacy `ignore::WalkBuilder` for the
+entire invocation. Both paths share the same post-filter pipeline, so the
+observable differences below come from Everything's index semantics, not
+from divergent CLI handling.
+
+* **Index lag.** Everything's index reflects what the indexer has observed
+  on the watched volumes. A file created milliseconds ago may not appear in
+  results until the index catches up.
+* **Unindexed paths fall back to the legacy walker.** Each search root is
+  probed by a one-shot count-only `path:"<root>"` query before the real
+  search. When that probe reports zero hits (typical of freshly-created
+  tempdirs or non-NTFS volumes), or when Everything's IPC layer is
+  unavailable, the dispatcher silently routes that root to the legacy
+  `ignore::WalkBuilder`. Use `--filesystem-walker` to force the legacy
+  path explicitly for every root.
+* **Result ordering differs from upstream `fd`.** Everything returns hits
+  in its index's native order (roughly modification-time, varies with
+  index settings). Pipe through `sort` when ordering matters.
+* **`--prune` delays `--exec` startup.** Because Everything returns a flat
+  result set (no "enter a directory" event), `--prune` buffers hits into a
+  path-sorted map and only emits after the backend finishes, so that a
+  pruned parent is guaranteed to be seen before any of its children. The
+  consequence is that `--prune` + `--exec` (or `--exec-batch`) cannot start
+  the child process for the first hit until the buffered batch drains. If
+  you need streaming `--exec`, drop `--prune`.
+* **Symlinks and reparse points are not expanded under the Everything
+  backend.** Everything returns whatever the index stores; junctions and
+  symlinks are emitted as themselves rather than resolved targets. The
+  legacy walker continues to honour `--follow` as upstream `fd` does.
+* **Ctrl-C latency is bounded by hit cadence, not query duration.** The
+  EverythingBackend polls the cancellation token between hits, so Ctrl-C
+  unwinds within one hit interval (sub-millisecond on typical workloads).
+  Cancelling the blocking `Everything_QueryW` itself mid-query — for
+  responses to extreme single-query latencies — requires a hidden Win32
+  message window that is tracked as a future enhancement, not shipped.
+
+## License notice for the Everything SDK
+
+This fork links against voidtools' Everything SDK (header + import library)
+to drive the index. The SDK headers under `Everything-SDK/` are redistributed
+as-is from voidtools per their SDK license; see `Everything-SDK/README.md`
+upstream for the full text. **We do not redistribute `Everything64.dll` or
+the Everything installer** — end users must install Everything themselves
+from <https://www.voidtools.com/downloads/>. The rest of the codebase
+remains under the upstream fd MIT / Apache-2.0 dual license (see
+`LICENSE-MIT` and `LICENSE-APACHE`).
 
 ## Features
 
