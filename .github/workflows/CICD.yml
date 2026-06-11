@@ -91,17 +91,23 @@ jobs:
         choco install everything --version=1.4.11032 -y --no-progress
         # Start the service so tests that touch the SDK have an index.
         Start-Service "Everything" -ErrorAction SilentlyContinue
-        # Everything64.dll ships next to Everything.exe but the installer
-        # does NOT add its directory to PATH. Without this, the load-time
-        # dependency in fde.exe resolves to STATUS_DLL_NOT_FOUND (0xC0000135)
-        # and every mock_e2e test that spawns the binary aborts at process
-        # startup before any test logic runs.
-        foreach ($dir in @("C:\Program Files\Everything", "C:\Program Files (x86)\Everything")) {
-          if (Test-Path (Join-Path $dir "Everything64.dll")) {
-            Add-Content -Path $env:GITHUB_PATH -Value $dir
-            Write-Host "Added $dir to PATH"
-          }
-        }
+        # The chocolatey 'everything' package installs Everything.exe but
+        # strips the SDK DLLs (es.exe is also stripped — see the package
+        # WARNING line). fde.exe has a load-time dependency on
+        # Everything{32,64}.dll, so without them every spawn of the binary
+        # aborts with STATUS_DLL_NOT_FOUND (0xC0000135) before any test
+        # logic runs. Fetch the official SDK zip from voidtools and stage
+        # the DLLs in the workspace (kept outside C:\Program Files so the
+        # i686 binary is not affected by WOW64 file-system redirection).
+        $sdkDir = Join-Path $env:GITHUB_WORKSPACE ".everything-runtime"
+        New-Item -ItemType Directory -Path $sdkDir -Force | Out-Null
+        $sdkZip = Join-Path $env:RUNNER_TEMP "Everything-SDK.zip"
+        Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-SDK.zip" -OutFile $sdkZip -UseBasicParsing
+        Expand-Archive -Path $sdkZip -DestinationPath $sdkDir -Force
+        $dllDir = Join-Path $sdkDir "dll"
+        Add-Content -Path $env:GITHUB_PATH -Value $dllDir
+        Write-Host "Added $dllDir to PATH"
+        Get-ChildItem $dllDir
     - name: Run clippy (on minimum supported rust version to prevent warnings we can't fix)
       shell: bash
       run: cargo clippy --locked --all-targets ${MSRV_FEATURES}
@@ -154,17 +160,23 @@ jobs:
         }
         choco install everything --version=1.4.11032 -y --no-progress
         Start-Service "Everything" -ErrorAction SilentlyContinue
-        # Everything64.dll ships next to Everything.exe but the installer
-        # does NOT add its directory to PATH. Without this, the load-time
-        # dependency in fde.exe resolves to STATUS_DLL_NOT_FOUND (0xC0000135)
-        # and every mock_e2e test that spawns the binary aborts at process
-        # startup before any test logic runs.
-        foreach ($dir in @("C:\Program Files\Everything", "C:\Program Files (x86)\Everything")) {
-          if (Test-Path (Join-Path $dir "Everything64.dll")) {
-            Add-Content -Path $env:GITHUB_PATH -Value $dir
-            Write-Host "Added $dir to PATH"
-          }
-        }
+        # The chocolatey 'everything' package installs Everything.exe but
+        # strips the SDK DLLs (es.exe is also stripped — see the package
+        # WARNING line). fde.exe has a load-time dependency on
+        # Everything{32,64}.dll, so without them every spawn of the binary
+        # aborts with STATUS_DLL_NOT_FOUND (0xC0000135) before any test
+        # logic runs. Fetch the official SDK zip from voidtools and stage
+        # the DLLs in the workspace (kept outside C:\Program Files so the
+        # i686 binary is not affected by WOW64 file-system redirection).
+        $sdkDir = Join-Path $env:GITHUB_WORKSPACE ".everything-runtime"
+        New-Item -ItemType Directory -Path $sdkDir -Force | Out-Null
+        $sdkZip = Join-Path $env:RUNNER_TEMP "Everything-SDK.zip"
+        Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-SDK.zip" -OutFile $sdkZip -UseBasicParsing
+        Expand-Archive -Path $sdkZip -DestinationPath $sdkDir -Force
+        $dllDir = Join-Path $sdkDir "dll"
+        Add-Content -Path $env:GITHUB_PATH -Value $dllDir
+        Write-Host "Added $dllDir to PATH"
+        Get-ChildItem $dllDir
 
     - name: Show version information (Rust, cargo)
       shell: bash
