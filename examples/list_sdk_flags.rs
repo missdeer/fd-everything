@@ -42,6 +42,18 @@ mod sys {
     #![allow(dead_code)]
     #![allow(clippy::all)]
 
+    // The build script emits `cargo:rustc-link-lib=dylib=Everything64`, which
+    // applies cleanly to the `fde` bin but does NOT propagate to example
+    // targets in this binary-only package on MSRV — `cargo test` then fails to
+    // link the example with LNK2019 on `Everything_Get*Version`. The empty
+    // extern block below carries a `#[link]` attribute that tells rustc to
+    // pull in `Everything64.lib` specifically for this example.
+    #[cfg_attr(target_arch = "x86_64", link(name = "Everything64", kind = "dylib"))]
+    #[cfg_attr(target_arch = "x86", link(name = "Everything32", kind = "dylib"))]
+    #[cfg_attr(target_arch = "aarch64", link(name = "EverythingARM64", kind = "dylib"))]
+    #[cfg_attr(target_arch = "arm", link(name = "EverythingARM", kind = "dylib"))]
+    unsafe extern "C" {}
+
     include!(concat!(env!("OUT_DIR"), "/everything_bindings.rs"));
 }
 

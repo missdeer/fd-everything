@@ -91,6 +91,17 @@ jobs:
         choco install everything --version=1.4.11032 -y --no-progress
         # Start the service so tests that touch the SDK have an index.
         Start-Service "Everything" -ErrorAction SilentlyContinue
+        # Everything64.dll ships next to Everything.exe but the installer
+        # does NOT add its directory to PATH. Without this, the load-time
+        # dependency in fde.exe resolves to STATUS_DLL_NOT_FOUND (0xC0000135)
+        # and every mock_e2e test that spawns the binary aborts at process
+        # startup before any test logic runs.
+        foreach ($dir in @("C:\Program Files\Everything", "C:\Program Files (x86)\Everything")) {
+          if (Test-Path (Join-Path $dir "Everything64.dll")) {
+            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            Write-Host "Added $dir to PATH"
+          }
+        }
     - name: Run clippy (on minimum supported rust version to prevent warnings we can't fix)
       shell: bash
       run: cargo clippy --locked --all-targets ${MSRV_FEATURES}
@@ -143,6 +154,17 @@ jobs:
         }
         choco install everything --version=1.4.11032 -y --no-progress
         Start-Service "Everything" -ErrorAction SilentlyContinue
+        # Everything64.dll ships next to Everything.exe but the installer
+        # does NOT add its directory to PATH. Without this, the load-time
+        # dependency in fde.exe resolves to STATUS_DLL_NOT_FOUND (0xC0000135)
+        # and every mock_e2e test that spawns the binary aborts at process
+        # startup before any test logic runs.
+        foreach ($dir in @("C:\Program Files\Everything", "C:\Program Files (x86)\Everything")) {
+          if (Test-Path (Join-Path $dir "Everything64.dll")) {
+            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            Write-Host "Added $dir to PATH"
+          }
+        }
 
     - name: Show version information (Rust, cargo)
       shell: bash
