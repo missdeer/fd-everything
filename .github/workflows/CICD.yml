@@ -229,7 +229,19 @@ jobs:
       run: |
         # Upstream `make completions` assumes target/release/fd; this fork
         # builds target/${target}/release/fde.exe (renamed binary, cross-
-        # compiled).
+        # compiled). Skip on ARM64 — even with EverythingARM64.dll staged
+        # on PATH, launching the native ARM64 fde.exe from Git Bash on the
+        # windows-11-arm runner aborts with exit 127 before clap runs
+        # (Git Bash itself is x64 under Prism emulation). Tests pass only
+        # because cargo's test binary drops the Everything import when no
+        # FFI symbol is reachable from #[cfg(test)] code. The empty
+        # autocomplete/ directory keeps the subsequent `cp -r autocomplete`
+        # step happy.
+        if [[ "${target}" == aarch64-* ]]; then
+          echo "Skipping completion generation on ARM64 (fde.exe fails to launch under Git Bash)"
+          mkdir -p autocomplete
+          exit 0
+        fi
         mkdir -p autocomplete
         "${BIN_PATH}" --gen-completions bash       > autocomplete/fde.bash
         "${BIN_PATH}" --gen-completions fish       > autocomplete/fde.fish
