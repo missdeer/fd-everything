@@ -152,14 +152,15 @@ jobs:
       shell: pwsh
       run: |
         # PLAN.md Phase 0: preinstall Everything >= 1.4.1, start the service.
-        # Skipped on the ARM64 runner — voidtools provides no native ARM64
-        # build yet; tests that need the SDK are gated separately.
-        if ("${{ matrix.job.target }}" -like "aarch64-*") {
-          Write-Host "Skipping Everything install on ARM64 runner"
-          exit 0
+        # voidtools provides no native ARM64 Everything.exe build, but the
+        # SDK zip ships EverythingARM64.dll — stage it so the packaged
+        # archive contains the matching runtime DLL.
+        if ("${{ matrix.job.target }}" -notlike "aarch64-*") {
+          choco install everything --version=1.4.11032 -y --no-progress
+          Start-Service "Everything" -ErrorAction SilentlyContinue
+        } else {
+          Write-Host "Skipping Everything service install on ARM64 (no native build); staging SDK DLL only"
         }
-        choco install everything --version=1.4.11032 -y --no-progress
-        Start-Service "Everything" -ErrorAction SilentlyContinue
         # The chocolatey 'everything' package installs Everything.exe but
         # strips the SDK DLLs (es.exe is also stripped — see the package
         # WARNING line). fde.exe has a load-time dependency on
@@ -228,14 +229,7 @@ jobs:
       run: |
         # Upstream `make completions` assumes target/release/fd; this fork
         # builds target/${target}/release/fde.exe (renamed binary, cross-
-        # compiled). Skip on ARM64 — Everything DLLs are not staged there,
-        # so fde.exe aborts with STATUS_DLL_NOT_FOUND before --gen-completions
-        # runs.
-        if [[ "${target}" == aarch64-* ]]; then
-          echo "Skipping completion generation on ARM64 (no Everything SDK DLLs)"
-          mkdir -p autocomplete
-          exit 0
-        fi
+        # compiled).
         mkdir -p autocomplete
         "${BIN_PATH}" --gen-completions bash       > autocomplete/fde.bash
         "${BIN_PATH}" --gen-completions fish       > autocomplete/fde.fish
@@ -269,6 +263,16 @@ jobs:
 
         # Autocompletion files
         cp -r autocomplete "${ARCHIVE_DIR}"
+
+        # Everything SDK runtime DLL — fde.exe has a load-time dependency on
+        # Everything{32,64}.dll. Ship it alongside the binary so users don't
+        # need to hunt down the voidtools SDK zip. ARM64 has no native DLL.
+        SDK_DLL_DIR="${GITHUB_WORKSPACE}/.everything-runtime/dll"
+        case ${target} in
+        i686-*)        cp "${SDK_DLL_DIR}/Everything32.dll"  "$ARCHIVE_DIR" ;;
+        x86_64-*)      cp "${SDK_DLL_DIR}/Everything64.dll"  "$ARCHIVE_DIR" ;;
+        aarch64-*)     cp "${SDK_DLL_DIR}/EverythingARM64.dll" "$ARCHIVE_DIR" ;;
+        esac
 
         # base compressed package
         pushd "${PKG_STAGING}/" >/dev/null
