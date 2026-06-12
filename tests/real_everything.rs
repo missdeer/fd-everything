@@ -2,8 +2,10 @@
 //!
 //! These tests spawn `fde` with no env-var gating (PLAN §Phase 8.7.1
 //! MUST 3 retired the `FDE_BACKEND=everything` opt-in) and check that
-//! results come back. Routing decisions belong entirely to the
-//! `EverythingVolumeIndexProbe`. They require:
+//! results come back. Default routing trusts indexed roots and queries
+//! `EverythingBackend` directly (§Phase 8.8 flipped the per-root probe
+//! to opt-in); the probe-fallback test below opts in via `--probe`. They
+//! require:
 //!
 //! 1. Windows host with Everything installed (the binary itself only
 //!    builds on Windows; that's enforced upstream via
@@ -62,7 +64,11 @@ fn fde_exe() -> PathBuf {
 /// - The SDK call sequence in `EverythingBackend::run` broke (likely a
 ///   forgotten `set_request_flags` between calls — the global SDK mutex
 ///   makes this kind of bug latent), or
-/// - Phase 8.7 `EverythingVolumeIndexProbe` regressed to "always false".
+/// - Default routing or backend execution stopped returning indexed
+///   results altogether (this test can't isolate Everything vs Legacy
+///   on a real System32 — both walkers find `.exe` there — so a pass
+///   only proves "some path returned hits"; failure is the strong
+///   signal).
 ///
 /// Pattern `.exe` over `C:\Windows\System32` is a standing target on
 /// every Windows host. We don't assert a specific count because that
@@ -101,18 +107,18 @@ fn real_everything_smoke_finds_system32_executables() {
     );
 }
 
-/// PLAN §Phase 8.7 probe-fallback smoke: when Everything is running
-/// but the search root is freshly created and therefore NOT in the
-/// index, `EverythingVolumeIndexProbe::is_indexed` returns false
-/// (count-only `path:"<root>"` query yields zero hits), so the
-/// dispatcher silently routes the root to LegacyWalker, which DOES
-/// find the on-disk file. Before Phase 8.7 this returned empty —
-/// that was the whole reason the `FDE_BACKEND` opt-in gate existed,
-/// which §Phase 8.7.1 MUST 3 then retired now that the probe alone
-/// handles the unindexed-tempdir case correctly. If this regresses
-/// to empty, the probe has likely gone back to
-/// always-true (or AssumeIndexedProbe wired into production), and
-/// every tempdir test in `tests/tests.rs` will silently break.
+/// PLAN §Phase 8.7 probe-fallback smoke (now opt-in per §Phase 8.8):
+/// with `--probe` set, when Everything is running but the search root
+/// is freshly created and therefore NOT in the index,
+/// `EverythingVolumeIndexProbe::is_indexed` returns false (count-only
+/// `path:"<root>"` query yields zero hits), so the dispatcher silently
+/// routes the root to LegacyWalker, which DOES find the on-disk file.
+/// Without `--probe` (the new default) the dispatcher would query
+/// Everything directly and return empty for this tempdir — that is the
+/// trade Phase 8.8 explicitly accepted. If this regresses to empty
+/// despite `--probe`, either the probe has gone back to always-true,
+/// `AssumeIndexedProbe` got wired into production unconditionally, or
+/// the `--probe` plumbing broke between CLI and `WorkerState`.
 #[test]
 #[ignore = "requires Everything running; opt in with `--ignored`"]
 fn real_everything_probe_falls_back_for_unindexed_tempdir() {
@@ -125,6 +131,7 @@ fn real_everything_probe_falls_back_for_unindexed_tempdir() {
         .env_remove("FDE_TEST_MOCK_HITS")
         .args([
             "--no-global-ignore-file",
+            "--probe",
             "brand_new_file",
             tmp.path().to_str().unwrap(),
         ])

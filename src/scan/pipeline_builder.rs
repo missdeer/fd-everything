@@ -264,6 +264,7 @@ mod tests {
             hyperlink: false,
             ignore_contain: vec![],
             force_legacy: false,
+            probe: false,
             raw_pattern: String::new(),
             raw_and_patterns: vec![],
             pattern_is_glob: false,

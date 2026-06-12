@@ -7,6 +7,22 @@ upstream `fd` from commit [`25461e5`](https://github.com/sharkdp/fd/commit/25461
 See `PLAN.md` for the phased design log; the user-visible difference list
 lives in `README.md`.
 
+## Phase 8.8 (2026-06-12) — Lower first-byte latency
+
+- Flipped `DEFAULT_MAX_BUFFER_TIME` from 100 ms to 0. Output now streams
+  immediately instead of holding the first batch for up to 100 ms so
+  small queries can come out sorted. Use `--sort` (new) to restore the
+  upstream-fd behavior, or `--max-buffer-time=<ms>` for a custom window.
+- Made the per-root `EverythingVolumeIndexProbe` opt-in via `--probe`.
+  The previous default issued one count-only `path:"<root>"` IPC per
+  search root before every query (~10 ms locally, more on a stalled
+  service). The new default trusts the root is indexed and queries
+  Everything directly; roots with no indexed entries at all (fresh
+  tempdirs, excluded folders, non-NTFS volumes) can be reached via
+  `--probe`, which re-enables the count-only fallback. `--probe` does
+  not detect per-file index lag on a root that's already partially
+  indexed — for that, `--filesystem-walker` skips Everything entirely.
+
 ## Phase 8.7.1 (2026-06-11) — Default routing through Everything
 
 - Removed the `FDE_BACKEND=everything` opt-in gate. Default routing is

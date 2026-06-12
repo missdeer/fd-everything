@@ -153,6 +153,13 @@ pub struct Config {
     /// routing slice).
     pub force_legacy: bool,
 
+    /// CLI `--probe`. When true, run the real `EverythingVolumeIndexProbe`
+    /// (count-only `path:"<root>"` query) before each Everything routing
+    /// decision. Default false trusts the user's root is indexed and skips
+    /// the per-root IPC. Mock-backend sessions ignore this flag and force
+    /// `AssumeIndexedProbe` so tempdir fixtures still exercise the mock.
+    pub probe: bool,
+
     /// PLAN.md §Phase 8.5-A: raw user pattern, kept verbatim so the Phase 6
     /// translation layer (`scan::backend::everything::query::translate`) can
     /// drive Everything's own regex/glob engines. The compiled `Vec<Regex>`
