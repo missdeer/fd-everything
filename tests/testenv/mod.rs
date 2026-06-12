@@ -311,18 +311,19 @@ impl TestEnv {
         // Make sure LS_COLORS is unset to ensure consistent
         // color output
         cmd.env("LS_COLORS", "");
-        // PLAN §Phase 8.7.1 MUST 3 test-harness invariant: this suite
-        // verifies fd-parity behaviour on Windows tempdirs. After the
-        // MUST 3 default-flip, the production probe routes any tempdir
-        // whose parent (e.g. `%TEMP%`) is already in the Everything
-        // index into EverythingBackend — and Everything's async USN
-        // watcher lags brand-new files by ~hundreds of milliseconds,
-        // producing flaky stale-index hits. `FDE_TEST_FORCE_LEGACY=1`
-        // short-circuits that path in `walk::run_everything_paths` so
-        // these tests stay deterministic across CI and dev machines.
-        // The `EverythingBackend` integration path is covered by
-        // `tests/real_everything.rs` (against the real index) and
-        // `tests/mock_e2e.rs` (against the deterministic mock backend).
+        // Phase 8.7.1 MUST 3 + Phase 8.8 test-harness invariant: this
+        // suite verifies fd-parity behaviour on Windows tempdirs. Under
+        // Phase 8.8 default routing the dispatcher skips the per-root
+        // probe and sends every root directly to EverythingBackend —
+        // and Everything's async USN watcher lags brand-new files by
+        // ~hundreds of milliseconds, producing flaky stale-index hits
+        // (and silent empties for tempdirs the index hasn't seen yet).
+        // `FDE_TEST_FORCE_LEGACY=1` short-circuits that path in
+        // `walk::run_everything_paths` so these tests stay deterministic
+        // across CI and dev machines. The `EverythingBackend` integration
+        // path is covered by `tests/real_everything.rs` (against the real
+        // index) and `tests/mock_e2e.rs` (against the deterministic mock
+        // backend).
         cmd.env("FDE_TEST_FORCE_LEGACY", "1");
         cmd.args(args);
 

@@ -45,6 +45,7 @@ use std::env;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
@@ -370,7 +371,9 @@ fn construct_config(
         min_depth: opts.min_depth(),
         prune: opts.prune,
         threads: opts.threads().get(),
-        max_buffer_time: opts.max_buffer_time,
+        max_buffer_time: opts
+            .max_buffer_time
+            .or_else(|| opts.sort.then(|| Duration::from_millis(100))),
         ls_colors,
         hyperlink,
         interactive_terminal,
@@ -436,6 +439,7 @@ fn construct_config(
         search_roots: Arc::new(search_roots),
         ignore_contain: opts.ignore_contain,
         force_legacy: opts.filesystem_walker,
+        probe: opts.probe,
         // PLAN.md §Phase 8.5-A: keep the unprocessed pattern strings so the
         // Phase 6 translation layer can run inside `walk::scan`. clap's
         // `conflicts_with` guarantees at most one of glob/fixed/exact, so

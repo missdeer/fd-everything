@@ -41,16 +41,22 @@ from divergent CLI handling.
 * **Index lag.** Everything's index reflects what the indexer has observed
   on the watched volumes. A file created milliseconds ago may not appear in
   results until the index catches up.
-* **Unindexed paths fall back to the legacy walker.** Each search root is
-  probed by a one-shot count-only `path:"<root>"` query before the real
-  search. When that probe reports zero hits (typical of freshly-created
-  tempdirs or non-NTFS volumes), or when Everything's IPC layer is
-  unavailable, the dispatcher silently routes that root to the legacy
-  `ignore::WalkBuilder`. Use `--filesystem-walker` to force the legacy
-  path explicitly for every root.
+* **Unindexed roots return empty unless `--probe` is set.** By default
+  fde trusts every search root is in the Everything index and queries it
+  directly, saving a per-root IPC round-trip. Pass `--probe` to re-enable
+  the count-only `path:"<root>"` probe; on a zero-hit response or IPC
+  error the dispatcher then falls back to the legacy `ignore::WalkBuilder`
+  for that root, so fresh tempdirs or excluded folders still surface.
+  `--probe` does **not** detect per-file index lag — if the root already
+  has indexed entries, a brand-new file under it is still missed. Use
+  `--filesystem-walker` to skip Everything entirely and get an exact
+  on-disk scan.
 * **Result ordering differs from upstream `fd`.** Everything returns hits
   in its index's native order (roughly modification-time, varies with
-  index settings). Pipe through `sort` when ordering matters.
+  index settings), and fde streams them straight to stdout — first byte
+  appears as soon as the backend returns. Pass `--sort` to restore
+  upstream fd's behavior (buffer briefly so small queries come out
+  sorted), or pipe through `sort` when full ordering matters.
 * **`--prune` delays `--exec` startup.** Because Everything returns a flat
   result set (no "enter a directory" event), `--prune` buffers hits into a
   path-sorted map and only emits after the backend finishes, so that a

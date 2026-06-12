@@ -50,7 +50,14 @@ enum ReceiverMode {
 /// Maximum size of the output buffer before flushing results to the console
 const MAX_BUFFER_LENGTH: usize = 1000;
 /// Default duration until output buffering switches to streaming.
-const DEFAULT_MAX_BUFFER_TIME: Duration = Duration::from_millis(100);
+///
+/// fd upstream uses 100ms here so small queries finish inside the buffer
+/// window and come out sorted. fde diverges: Everything's index makes the
+/// first hit available within a few ms, so the 100ms wait is pure perceived
+/// latency for the common case. Default to zero (immediate streaming);
+/// users who want the opportunistic sort can pass `--sort` or
+/// `--max-buffer-time`.
+const DEFAULT_MAX_BUFFER_TIME: Duration = Duration::ZERO;
 
 /// Wrapper for the receiver thread's buffering behavior.
 struct ReceiverBuffer<'a, W> {
@@ -82,6 +89,15 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
         let interrupt_flag = state.interrupt_flag.as_ref();
         let max_buffer_time = config.max_buffer_time.unwrap_or(DEFAULT_MAX_BUFFER_TIME);
         let deadline = Instant::now() + max_buffer_time;
+        // Skip the Buffering state entirely when there's no budget for it —
+        // otherwise the first poll iteration parks a batch in `buffer` and
+        // only the second iteration's `recv_deadline` timeout flushes it,
+        // which costs a context switch the user paid `--stream` to avoid.
+        let mode = if max_buffer_time.is_zero() {
+            ReceiverMode::Streaming
+        } else {
+            ReceiverMode::Buffering
+        };
 
         Self {
             config,
@@ -89,7 +105,7 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
             interrupt_flag,
             rx,
             stdout,
-            mode: ReceiverMode::Buffering,
+            mode,
             deadline,
             buffer: Vec::with_capacity(MAX_BUFFER_LENGTH),
             num_results: 0,
@@ -685,14 +701,15 @@ impl WorkerState {
     ) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let config = &self.config;
 
-        // PLAN.md §Phase 8.7.1 MUST 3: the `FDE_BACKEND=everything`
-        // opt-in gate is gone. Routing is decided by the
-        // `EverythingVolumeIndexProbe` alone — unindexed paths cleanly
-        // fall back to LegacyWalker, indexed ones drive
-        // EverythingBackend. The semantic parity gaps that originally
-        // kept the gate (directory-symlink type, hidden-by-name
-        // ancestors, size-filter on reparse points) were closed by
-        // MUST 1 + MUST 2.
+        // PLAN.md §Phase 8.7.1 MUST 3 retired the `FDE_BACKEND=everything`
+        // opt-in gate, and §Phase 8.8 then flipped the per-root probe
+        // default to off. So routing now goes: every root drives
+        // `EverythingBackend` directly unless `--filesystem-walker` is
+        // set, the translation gives up, or `--probe` is on and the
+        // count-only probe reports zero hits. The semantic parity gaps
+        // that originally kept the §8.7 gate (directory-symlink type,
+        // hidden-by-name ancestors, size-filter on reparse points) were
+        // closed by §8.7.1 MUST 1 + MUST 2.
         //
         // Test-only escape hatch: `FDE_TEST_FORCE_LEGACY=1` shorts the
         // Everything path entirely, mirroring `--filesystem-walker`.
@@ -724,12 +741,19 @@ impl WorkerState {
             }
         };
 
-        // PLAN.md §Phase 8.7: pick a probe. The real
-        // `EverythingVolumeIndexProbe` issues a count-only
-        // `path:"<root>"` query and routes to Legacy on either an
-        // IPC error or a zero-count response — so a tempdir that
-        // Everything hasn't seen yet falls through to the legacy
+        // Pick a probe. The real `EverythingVolumeIndexProbe` issues a
+        // count-only `path:"<root>"` query per root and routes to Legacy
+        // on either an IPC error or a zero-count response — so a tempdir
+        // that Everything hasn't seen yet falls through to the legacy
         // walker and still produces results.
+        //
+        // Default flipped: `AssumeIndexedProbe` skips the per-root IPC
+        // and trusts every root is indexed. Empirically Everything's USN
+        // indexer catches up within seconds, so by the time a user types
+        // `fde` the file is in the index; paying an IPC per root every
+        // run to guard a sub-second race is a bad trade. The escape
+        // hatches stay: `--probe` re-enables the real probe, and
+        // `--filesystem-walker` skips Everything entirely.
         //
         // Mock-injection sessions force `AssumeIndexedProbe`: the test
         // harness uses tempdirs that the real probe would correctly
@@ -739,7 +763,7 @@ impl WorkerState {
         // into production binaries.
         let assume_probe = AssumeIndexedProbe;
         let real_probe = EverythingVolumeIndexProbe;
-        let probe: &dyn VolumeIndexProbe = if mock_backend.is_some() {
+        let probe: &dyn VolumeIndexProbe = if mock_backend.is_some() || !config.probe {
             &assume_probe
         } else {
             &real_probe

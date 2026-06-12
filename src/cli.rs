@@ -559,9 +559,21 @@ pub struct Opts {
     /// Milliseconds to buffer before streaming search results to console
     ///
     /// Amount of time in milliseconds to buffer, before streaming the search
-    /// results to the console.
-    #[arg(long, hide = true, value_parser = parse_millis)]
+    /// results to the console. fde defaults to 0 (immediate streaming);
+    /// upstream fd's 100ms behavior is available via `--sort` or by passing
+    /// an explicit value here.
+    #[arg(long, hide_short_help = true, value_parser = parse_millis)]
     pub max_buffer_time: Option<Duration>,
+
+    /// Buffer for a short window so small queries come out sorted
+    ///
+    /// Restores fd upstream's default: collect results for ~100ms, sort
+    /// them, then stream the rest in arrival order. Use this when reading
+    /// fde output by eye and the perceived ordering matters more than
+    /// first-byte latency. Equivalent to `--max-buffer-time=100`; an
+    /// explicit `--max-buffer-time` always wins regardless of flag order.
+    #[arg(long, hide_short_help = true)]
+    pub sort: bool,
 
     ///Limit the number of search results to 'count' and quit immediately.
     #[arg(
@@ -701,6 +713,21 @@ pub struct Opts {
         long_help
     )]
     pub filesystem_walker: bool,
+
+    /// Verify each search root is in the Everything index before querying it.
+    ///
+    /// fde defaults to trusting that the root is indexed and issuing the
+    /// Everything query directly. With `--probe`, fde first runs a count-only
+    /// `path:"<root>"` query per root; if it returns zero — meaning the root
+    /// has no indexed entries at all (fresh tempdirs, excluded folders,
+    /// non-NTFS volumes) — the root falls back to the legacy walker. Costs
+    /// one extra IPC per search root, ~10ms locally, more on a stalled
+    /// Everything service. Note: this does not catch per-file index lag for
+    /// new files under a root that already has indexed entries — Everything
+    /// reports the root as "indexed" and the new file is still missed. Use
+    /// `--filesystem-walker` for an exact on-disk scan.
+    #[arg(long, hide_short_help = true)]
+    pub probe: bool,
 
     #[cfg(feature = "completions")]
     #[arg(long, hide = true, exclusive = true)]

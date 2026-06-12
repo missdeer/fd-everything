@@ -251,6 +251,16 @@ fn malformed_mock_fixture_surfaces_error_and_falls_back() {
 /// a stale `FDE_TEST_MOCK_HITS` lookup from a previous shell session
 /// could let mock data silently leak into production `fde` invocations.
 ///
+/// The verification mechanism: a fresh tempdir is not yet in
+/// Everything's index, so `--probe` routes it to the legacy walker,
+/// which reads `real.txt` straight off disk. Without `--probe` the new
+/// default skips the probe and queries Everything directly; Everything
+/// returns 0 for the un-indexed tempdir and the test would see an empty
+/// result that looks identical to "mock loaded but matched nothing" —
+/// destroying the test's ability to tell the two apart. `--probe` keeps
+/// this specific test's signal alive; it does not affect the
+/// `FDE_TEST_MOCK_HITS` gate itself.
+///
 /// The positive half ("FDE_TEST_MOCK_HITS alone DOES trigger the mock")
 /// is covered by `mock_injection_streams_hits_through_pipeline` —
 /// `run_fde_with_mock` now removes `FDE_BACKEND` before launching, so
@@ -264,7 +274,7 @@ fn mock_env_unset_means_no_mock_injection() {
     // No mock hit on disk; if the dispatcher still reaches for a stale
     // FDE_TEST_MOCK_HITS, this won't match any real file but the test
     // harness would also report something other than real.txt.
-    let (stdout, _stderr, code) = run_fde_without_mock(root, &["txt", "."]);
+    let (stdout, _stderr, code) = run_fde_without_mock(root, &["--probe", "txt", "."]);
     assert_eq!(code, Some(0));
     let got = sorted_lines(&stdout);
     assert!(

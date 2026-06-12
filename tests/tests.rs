@@ -2880,13 +2880,11 @@ fn test_ignore_contain_precedence_over_root_check() {
 /// PLAN.md §Phase 8.5 + §Phase 8.7.1 MUST 3: pin the
 /// `--filesystem-walker` CLI flag as the "force LegacyWalker" escape
 /// hatch. The flag is plumbed into `Config.force_legacy` and consulted
-/// by `selection::select_backend` before any probe runs. With MUST 3
-/// the env-var gate is gone — routing is decided by the
-/// `EverythingVolumeIndexProbe`, which returns false for unindexed
-/// paths (every tempdir in this test suite) and so falls back to
-/// LegacyWalker. Byte-identical output between flag-on and the default
-/// path therefore comes from "probe → Legacy" not "gate → Legacy",
-/// but the user-visible assertion is unchanged.
+/// by `selection::select_backend` before any probe runs. This harness
+/// also sets `FDE_TEST_FORCE_LEGACY=1` (see `tests/testenv/mod.rs`) so
+/// the test stays deterministic on dev machines regardless of how
+/// Phase 8.8's probe default evolves; the assertion here only pins the
+/// explicit-flag path, not the default-routing equivalence.
 #[test]
 fn test_filesystem_walker_routes_to_legacy_walker() {
     let te = TestEnv::new(DEFAULT_DIRS, DEFAULT_FILES);
@@ -2907,10 +2905,12 @@ fn test_filesystem_walker_routes_to_legacy_walker() {
 // the assertion would trivially pass and stop encoding a meaningful
 // invariant (Rule 9). The routing-seam alarm now lives in
 // `tests/real_everything.rs::real_everything_smoke_finds_system32_executables`,
-// which proves the dispatcher fires against the real Everything index
-// under non-tempdir conditions, and in
+// which proves known indexed paths still return results under default
+// routing (it can't distinguish Everything vs Legacy on System32 since
+// both find `.exe` there), and in
 // `real_everything_probe_falls_back_for_unindexed_tempdir`, which
-// proves the probe correctly demotes fresh tempdirs to Legacy. A
+// proves the opt-in `--probe` correctly demotes fresh tempdirs to
+// Legacy under the new Phase 8.8 default. A
 // proper "default == --filesystem-walker byte-for-byte" alarm against
 // a real (warmed) Everything index is tracked as a deferral; see the
 // project_phase_8_7_1_test_flake memory note.
