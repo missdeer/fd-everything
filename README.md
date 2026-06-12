@@ -78,11 +78,16 @@ from divergent CLI handling.
 ## License notice for the Everything SDK
 
 This fork links against voidtools' Everything SDK (header + import library)
-to drive the index. The SDK headers under `Everything-SDK/` are redistributed
-as-is from voidtools per their SDK license; see `Everything-SDK/README.md`
-upstream for the full text. **We do not redistribute `Everything64.dll` or
-the Everything installer** — end users must install Everything themselves
-from <https://www.voidtools.com/downloads/>. The rest of the codebase
+to drive the index. The SDK is **not vendored** in this repository; the
+build (CI and local) fetches `https://www.voidtools.com/Everything-SDK.zip`
+and extracts it to `Everything-SDK/` at the repo root, where `build.rs`
+picks up `Everything-SDK/include/Everything.h` (bindgen input) and the
+matching `Everything-SDK/lib/Everything*.lib` import library. Release
+archives bundle the matching `Everything{32,64,ARM64}.dll` runtime
+alongside `fde.exe` under the same voidtools SDK license terms, so users
+do not need to hunt down the SDK zip. **We do not redistribute the
+Everything installer itself** — end users must install Everything
+(the indexing service) from <https://www.voidtools.com/downloads/>. The rest of the codebase
 remains under the upstream fd MIT / Apache-2.0 dual license (see
 `LICENSE-MIT` and `LICENSE-APACHE`).
 
@@ -807,10 +812,17 @@ The [release page](https://github.com/sharkdp/fd/releases) includes precompiled 
 
 ## Development
 ```bash
-git clone https://github.com/sharkdp/fd
+git clone https://github.com/missdeer/fd-everything
+cd fd-everything
+
+# Fetch the Everything SDK (headers + import libs) into Everything-SDK/.
+# build.rs reads the header and links the matching Everything*.lib.
+# PowerShell on Windows:
+#   Invoke-WebRequest https://www.voidtools.com/Everything-SDK.zip -OutFile sdk.zip
+#   Expand-Archive sdk.zip -DestinationPath Everything-SDK
+#   Remove-Item sdk.zip
 
 # Build
-cd fd
 cargo build
 
 # Run unit tests and integration tests

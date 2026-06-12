@@ -68,6 +68,17 @@ jobs:
     - uses: actions/checkout@v7.0.1
       with:
         persist-credentials: false
+    - name: Fetch Everything SDK (headers + import libs)
+      shell: pwsh
+      run: |
+        # build.rs links Everything{32,64,ARM,ARM64}.lib and feeds
+        # Everything-SDK/include/Everything.h to bindgen, so clippy
+        # (which compiles the crate) needs the SDK staged in-tree.
+        $sdkDir = Join-Path $env:GITHUB_WORKSPACE "Everything-SDK"
+        New-Item -ItemType Directory -Path $sdkDir -Force | Out-Null
+        $sdkZip = Join-Path $env:RUNNER_TEMP "Everything-SDK.zip"
+        Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-SDK.zip" -OutFile $sdkZip -UseBasicParsing
+        Expand-Archive -Path $sdkZip -DestinationPath $sdkDir -Force
     - run: cargo clippy --all-targets --all-features -- -Dwarnings
 
   min_version:
@@ -96,10 +107,15 @@ jobs:
         # WARNING line). fde.exe has a load-time dependency on
         # Everything{32,64}.dll, so without them every spawn of the binary
         # aborts with STATUS_DLL_NOT_FOUND (0xC0000135) before any test
-        # logic runs. Fetch the official SDK zip from voidtools and stage
-        # the DLLs in the workspace (kept outside C:\Program Files so the
-        # i686 binary is not affected by WOW64 file-system redirection).
-        $sdkDir = Join-Path $env:GITHUB_WORKSPACE ".everything-runtime"
+        # logic runs. The SDK is also no longer vendored in-tree, so
+        # build.rs needs Everything-SDK/include/Everything.h and the
+        # import libs under Everything-SDK/lib/ to compile. Fetch the
+        # official SDK zip from voidtools and extract it to
+        # Everything-SDK/ at the repo root, which gives us dll/, include/,
+        # and lib/ all at the paths build.rs and the packaging step
+        # expect. Kept outside C:\Program Files so the i686 binary is
+        # not affected by WOW64 file-system redirection.
+        $sdkDir = Join-Path $env:GITHUB_WORKSPACE "Everything-SDK"
         New-Item -ItemType Directory -Path $sdkDir -Force | Out-Null
         $sdkZip = Join-Path $env:RUNNER_TEMP "Everything-SDK.zip"
         Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-SDK.zip" -OutFile $sdkZip -UseBasicParsing
@@ -166,10 +182,15 @@ jobs:
         # WARNING line). fde.exe has a load-time dependency on
         # Everything{32,64}.dll, so without them every spawn of the binary
         # aborts with STATUS_DLL_NOT_FOUND (0xC0000135) before any test
-        # logic runs. Fetch the official SDK zip from voidtools and stage
-        # the DLLs in the workspace (kept outside C:\Program Files so the
-        # i686 binary is not affected by WOW64 file-system redirection).
-        $sdkDir = Join-Path $env:GITHUB_WORKSPACE ".everything-runtime"
+        # logic runs. The SDK is also no longer vendored in-tree, so
+        # build.rs needs Everything-SDK/include/Everything.h and the
+        # import libs under Everything-SDK/lib/ to compile. Fetch the
+        # official SDK zip from voidtools and extract it to
+        # Everything-SDK/ at the repo root, which gives us dll/, include/,
+        # and lib/ all at the paths build.rs and the packaging step
+        # expect. Kept outside C:\Program Files so the i686 binary is
+        # not affected by WOW64 file-system redirection.
+        $sdkDir = Join-Path $env:GITHUB_WORKSPACE "Everything-SDK"
         New-Item -ItemType Directory -Path $sdkDir -Force | Out-Null
         $sdkZip = Join-Path $env:RUNNER_TEMP "Everything-SDK.zip"
         Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-SDK.zip" -OutFile $sdkZip -UseBasicParsing
@@ -279,7 +300,7 @@ jobs:
         # Everything SDK runtime DLL — fde.exe has a load-time dependency on
         # Everything{32,64}.dll. Ship it alongside the binary so users don't
         # need to hunt down the voidtools SDK zip. ARM64 has no native DLL.
-        SDK_DLL_DIR="${GITHUB_WORKSPACE}/.everything-runtime/dll"
+        SDK_DLL_DIR="${GITHUB_WORKSPACE}/Everything-SDK/dll"
         case ${target} in
         i686-*)        cp "${SDK_DLL_DIR}/Everything32.dll"  "$ARCHIVE_DIR" ;;
         x86_64-*)      cp "${SDK_DLL_DIR}/Everything64.dll"  "$ARCHIVE_DIR" ;;

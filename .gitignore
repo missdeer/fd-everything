@@ -11,10 +11,7 @@ target/
 /redist/Everything64.dll
 # Claude Code local settings (machine-specific permissions, not portable).
 /.claude/
-# Everything-SDK: vendor only the headers (bindgen input) and import
-# libs (link target). The runtime DLLs are not redistributed per PLAN
-# §Phase 9 / R13; the SDK's demo apps, IPC protocol header, VS project
-# files, and C source are not used by the Rust build.
-/Everything-SDK/*
-!/Everything-SDK/include/
-!/Everything-SDK/lib/
+# Everything-SDK: not vendored. `build.rs` consumes the SDK headers +
+# import libs at build time; CI fetches the official zip from
+# voidtools.com, and local developers do the same (see README).
+/Everything-SDK/
