@@ -223,7 +223,24 @@ jobs:
     - name: Generate completions
       id: completions
       shell: bash
-      run: make completions
+      env:
+        BIN_PATH: ${{ steps.bin.outputs.BIN_PATH }}
+      run: |
+        # Upstream `make completions` assumes target/release/fd; this fork
+        # builds target/${target}/release/fde.exe (renamed binary, cross-
+        # compiled). Skip on ARM64 — Everything DLLs are not staged there,
+        # so fde.exe aborts with STATUS_DLL_NOT_FOUND before --gen-completions
+        # runs.
+        if [[ "${target}" == aarch64-* ]]; then
+          echo "Skipping completion generation on ARM64 (no Everything SDK DLLs)"
+          mkdir -p autocomplete
+          exit 0
+        fi
+        mkdir -p autocomplete
+        "${BIN_PATH}" --gen-completions bash       > autocomplete/fde.bash
+        "${BIN_PATH}" --gen-completions fish       > autocomplete/fde.fish
+        "${BIN_PATH}" --gen-completions zsh        > autocomplete/_fde
+        "${BIN_PATH}" --gen-completions powershell > autocomplete/_fde.ps1
 
     - name: Create tarball
       id: package
