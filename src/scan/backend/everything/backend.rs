@@ -260,11 +260,20 @@ fn push_quoted_path(s: &mut String, root: &Path) {
     // that Phase 6's translation layer will reject it before we get here.
     // Defensive: strip any inner quotes so we can't construct a malformed
     // query that would silently widen the search.
+    //
+    // Windows: Everything's `path:` filter only matches backslash form,
+    // so a caller-supplied `D:/foo` root would silently return zero hits.
+    // Rust's `Path` treats `/` and `\` as equivalent everywhere else in
+    // fd — normalizing here (rather than at the CLI layer) keeps
+    // `SearchRoot.display` verbatim while the Everything query stays
+    // valid.
     s.push('"');
     for ch in root.to_string_lossy().chars() {
-        if ch != '"' {
-            s.push(ch);
+        if ch == '"' {
+            continue;
         }
+        let ch = if ch == '/' { '\\' } else { ch };
+        s.push(ch);
     }
     s.push('"');
 }
@@ -433,5 +442,26 @@ mod tests {
         q.paths = vec![PathBuf::from(r"C:\Program Files")];
         let s = build_search_string(&q, &q.paths[0]);
         assert!(s.contains(r#"path:"C:\Program Files""#), "got {s}");
+    }
+
+    /// Forward-slash roots (`fd . D:/foo`) reach the backend because
+    /// Rust's `Path` treats `/` and `\` as equivalent. Everything's
+    /// `path:` filter does not — a raw `path:"D:/foo"` silently returns
+    /// zero hits. The quoter MUST flip slashes on Windows so both
+    /// user-typed forms resolve to the same query. Non-Windows targets
+    /// don't ship EverythingBackend, so this test is Windows-gated.
+    #[cfg(windows)]
+    #[test]
+    fn search_string_normalizes_forward_slashes_on_windows() {
+        let q = base_query();
+        let s = build_search_string(&q, &PathBuf::from("D:/repo/sub"));
+        assert!(
+            s.contains(r#"path:"D:\repo\sub""#),
+            "forward-slash root must be flipped to backslash; got {s}"
+        );
+        assert!(
+            !s.contains(r#"D:/repo/sub"#),
+            "no forward-slash form should leak into the query; got {s}"
+        );
     }
 }

@@ -83,11 +83,16 @@ impl VolumeIndexProbe for EverythingVolumeIndexProbe {
 /// rule used by [`super::backend::build_search_string`] so the probe
 /// and the real query agree on which root means which set of hits.
 fn build_probe_query(root: &Path) -> String {
+    // Slash normalization matches `backend::push_quoted_path`: Everything's
+    // `path:` filter is backslash-only on Windows, so a `D:/foo` root
+    // supplied by the user has to be flipped before it hits the SDK.
     let mut s = String::from("path:\"");
     for ch in root.to_string_lossy().chars() {
-        if ch != '"' {
-            s.push(ch);
+        if ch == '"' {
+            continue;
         }
+        let ch = if ch == '/' { '\\' } else { ch };
+        s.push(ch);
     }
     s.push('"');
     s
@@ -120,5 +125,17 @@ mod tests {
     fn probe_query_strips_inner_quotes() {
         let q = build_probe_query(&PathBuf::from(r#"C:\weird"name"#));
         assert_eq!(q, r#"path:"C:\weirdname""#);
+    }
+
+    /// The probe must agree with `backend::push_quoted_path` on slash
+    /// normalization — otherwise a `D:/foo` root would probe as
+    /// "not indexed" (backslash-only match) and route to LegacyWalker,
+    /// then the real query would ALSO run backslash-only, and the two
+    /// paths would silently disagree on scope.
+    #[cfg(windows)]
+    #[test]
+    fn probe_query_normalizes_forward_slashes_on_windows() {
+        let q = build_probe_query(&PathBuf::from("D:/repo/sub"));
+        assert_eq!(q, r#"path:"D:\repo\sub""#);
     }
 }
