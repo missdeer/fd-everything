@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use crate::dir_entry::starts_with_dash;
 use crate::filesystem::strip_current_dir;
 
 /// A search root in two forms: the canonical absolute path used to match
@@ -136,11 +137,14 @@ impl<'a> PathProjector<'a> {
             };
         }
 
-        let mut joined = root.display.join(rel);
+        let joined = root.display.join(rel);
         if self.strip_cwd_prefix {
-            // strip_current_dir borrows; we need an owned PathBuf to return
-            // Cow::Owned, so collect after stripping.
-            joined = strip_current_dir(&joined).to_path_buf();
+            let stripped = strip_current_dir(&joined);
+            // Upstream fd-2011 guard: if stripping `./` exposes a leading `-`,
+            // keep the prefix so downstream tools don't parse the path as a flag.
+            if !starts_with_dash(stripped) {
+                return Cow::Owned(stripped.to_path_buf());
+            }
         }
         Cow::Owned(joined)
     }

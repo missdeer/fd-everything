@@ -191,6 +191,14 @@ fn make_absolute(path: &Path, cwd: &Path) -> PathBuf {
     cwd.join(path)
 }
 
+/// Ported from upstream `stripped_path` (sharkdp/fd PR #2011): when stripping
+/// the leading `./` would leave a path starting with `-`, downstream tools may
+/// misinterpret it as an option. The projector honours this via
+/// `PathProjector::project_for_output` under `--strip-cwd-prefix`.
+pub(crate) fn starts_with_dash(path: &Path) -> bool {
+    path.as_os_str().as_encoded_bytes().first() == Some(&b'-')
+}
+
 impl PartialEq for DirEntry {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
