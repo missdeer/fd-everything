@@ -33,6 +33,7 @@ pub mod fmt;
 pub mod hyperlink;
 pub mod output;
 pub mod regex_helper;
+pub mod sanitize;
 pub mod scan;
 pub mod walk;
 
