@@ -20,6 +20,79 @@ pub fn path_absolute_form(path: &Path) -> io::Result<PathBuf> {
     env::current_dir().map(|path_buf| path_buf.join(path))
 }
 
+/// Strip `base` from `path` using the host filesystem's path-comparison
+/// semantics. Rust's [`Path::strip_prefix`] is case-sensitive on every host,
+/// while Windows paths are case-insensitive.
+pub fn strip_path_prefix<'a>(path: &'a Path, base: &Path) -> Option<&'a Path> {
+    if let Ok(relative) = path.strip_prefix(base) {
+        return Some(relative);
+    }
+
+    #[cfg(windows)]
+    {
+        let mut path_components = path.components();
+        for base_component in base.components() {
+            let path_component = path_components.next()?;
+            if !windows_os_str_eq_ignore_case(
+                path_component.as_os_str(),
+                base_component.as_os_str(),
+            ) {
+                return None;
+            }
+        }
+        Some(path_components.as_path())
+    }
+
+    #[cfg(not(windows))]
+    None
+}
+
+/// Compare paths using the host filesystem's path-comparison semantics.
+pub fn paths_equal(left: &Path, right: &Path) -> bool {
+    strip_path_prefix(left, right).is_some_and(|relative| relative.as_os_str().is_empty())
+}
+
+#[cfg(windows)]
+fn windows_os_str_eq_ignore_case(left: &OsStr, right: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+
+    if left == right {
+        return true;
+    }
+
+    // Avoid UTF-16 buffers for the overwhelmingly common ASCII path. The
+    // Win32 comparison below supplies Windows' full ordinal case semantics
+    // for non-ASCII names and non-Unicode OsStr values.
+    let left_lossy = left.to_string_lossy();
+    let right_lossy = right.to_string_lossy();
+    if left_lossy.is_ascii() && right_lossy.is_ascii() {
+        return left_lossy.eq_ignore_ascii_case(&right_lossy);
+    }
+
+    let left_wide: Vec<u16> = left.encode_wide().collect();
+    let right_wide: Vec<u16> = right.encode_wide().collect();
+    let (Ok(left_len), Ok(right_len)) = (
+        i32::try_from(left_wide.len()),
+        i32::try_from(right_wide.len()),
+    ) else {
+        return false;
+    };
+    // SAFETY: both pointers remain valid for their explicitly supplied
+    // lengths for the duration of the call. CompareStringOrdinal does not
+    // require NUL termination when lengths are non-negative.
+    unsafe {
+        CompareStringOrdinal(
+            left_wide.as_ptr(),
+            left_len,
+            right_wide.as_ptr(),
+            right_len,
+            1,
+        ) == CSTR_EQUAL
+    }
+}
+
 pub fn absolute_path(path: &Path) -> io::Result<PathBuf> {
     let path_buf = path_absolute_form(path)?;
 
@@ -137,7 +210,7 @@ pub fn default_path_separator() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_current_dir;
+    use super::{paths_equal, strip_current_dir, strip_path_prefix};
     use std::path::Path;
 
     #[test]
@@ -152,5 +225,20 @@ mod tests {
             strip_current_dir(Path::new("foo/bar/baz")),
             Path::new("foo/bar/baz")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_prefix_is_case_insensitive() {
+        let relative = strip_path_prefix(
+            Path::new(r"C:\VulkanSDK\1.4.350.0\Bin\dxc.exe"),
+            Path::new(r"c:\vulkansdk"),
+        )
+        .unwrap();
+        assert_eq!(relative, Path::new(r"1.4.350.0\Bin\dxc.exe"));
+        assert!(paths_equal(
+            Path::new(r"C:\VulkanSDK"),
+            Path::new(r"c:\vulkansdk")
+        ));
     }
 }

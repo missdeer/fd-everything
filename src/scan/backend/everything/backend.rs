@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use super::error::EverythingError;
 use super::ffi::{self, sys};
+use crate::filesystem::strip_path_prefix;
 use crate::scan::backend::{
     BackendError, BackendQuery, BackendSink, CancellationToken, CaseModifier, PatternScope, RawHit,
     SearchBackend, TranslatedPattern,
@@ -188,9 +189,9 @@ fn build_raw_hit(sdk: &ffi::SdkGuard, index: u32, root: &Arc<PathBuf>) -> Option
 /// symlinked location; treating it as "depth 0" puts it at the root, which
 /// is the most lenient bound for max-depth filtering.
 fn depth_under_root(hit: &Path, root: &Path) -> usize {
-    match hit.strip_prefix(root) {
-        Ok(rel) => rel.components().filter(is_named_component).count(),
-        Err(_) => 0,
+    match strip_path_prefix(hit, root) {
+        Some(rel) => rel.components().filter(is_named_component).count(),
+        None => 0,
     }
 }
 
@@ -391,6 +392,18 @@ mod tests {
             depth_under_root(&PathBuf::from(r"C:\repo\src\foo\b.txt"), &root),
             3
         );
+    }
+
+    /// Windows accepts search roots with arbitrary casing, while Everything
+    /// returns the spelling stored in its index. A case mismatch must not turn
+    /// every descendant into depth zero (which `run_one_root` skips as if it
+    /// were the root entry itself).
+    #[cfg(windows)]
+    #[test]
+    fn depth_under_root_is_case_insensitive_on_windows() {
+        let root = PathBuf::from(r"C:\vulkanSDK");
+        let hit = PathBuf::from(r"C:\VulkanSDK\1.4.350.0\Bin\dxc.exe");
+        assert_eq!(depth_under_root(&hit, &root), 3);
     }
 
     /// Defensive: paths that don't fall under the search root (which

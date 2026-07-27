@@ -10,6 +10,7 @@
 
 use std::path::Component;
 
+use crate::filesystem::strip_path_prefix;
 use crate::scan::backend::RawHit;
 use crate::scan::post_filter::{Filter, Verdict};
 
@@ -31,13 +32,11 @@ impl Filter for HiddenByNameFilter {
         // Components ABOVE the search root don't count: the user may
         // explicitly pass a dot-prefixed root (`fd foo /home/u/.config`)
         // and expect its children to be walked, mirroring LegacyWalker.
-        // strip_prefix can only fail if `path` isn't under `search_root`,
+        // Prefix removal can only fail if `path` isn't under `search_root`,
         // which the EverythingBackend prevents via the `path:"<root>"`
         // clause — fall back to scanning all components in that case.
-        let rel = hit
-            .path
-            .strip_prefix(hit.search_root.as_path())
-            .unwrap_or(hit.path.as_path());
+        let rel =
+            strip_path_prefix(&hit.path, hit.search_root.as_path()).unwrap_or(hit.path.as_path());
         for component in rel.components() {
             if let Component::Normal(name) = component {
                 // First-byte check is enough for the dotfile convention;

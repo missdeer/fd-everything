@@ -42,6 +42,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::filesystem::paths_equal;
+
 use dashmap::DashMap;
 
 pub mod dir_state;
@@ -337,7 +339,7 @@ impl IgnoreCache {
             }
             // Climb. Stop at ceiling (--no-ignore-parent) and at filesystem root.
             if let Some(c) = ceiling
-                && dir == c
+                && paths_equal(dir, c)
             {
                 break;
             }
@@ -383,7 +385,7 @@ impl IgnoreCache {
                 return true;
             }
             if let Some(c) = ceiling
-                && dir == c
+                && paths_equal(dir, c)
             {
                 break;
             }
