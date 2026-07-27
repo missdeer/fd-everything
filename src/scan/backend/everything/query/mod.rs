@@ -145,10 +145,13 @@ fn translate_one(
     } else if input.exact {
         // PLAN §6.1 row 4: "--exact" is full-match literal. Reuse the
         // literal pipeline for escaping, then anchor with ^…$ in regex
-        // syntax (Everything's `regex:` engine).
+        // syntax (Everything's `regex:` engine). Quote the completed regex
+        // so Everything's outer query parser does not consume `^` or `\`.
         match literal::translate_fixed_string(raw) {
             literal::LiteralResult::Term(_) if raw.is_empty() => String::new(),
-            literal::LiteralResult::Term(_) => format!("regex:^{}$", escape_regex_meta(raw)),
+            literal::LiteralResult::Term(_) => {
+                format!("regex:\"^{}$\"", escape_regex_meta(raw))
+            }
             literal::LiteralResult::GiveUp => {
                 return Err(TranslationGiveUp {
                     reason: GiveUpReason::Literal,
@@ -165,7 +168,11 @@ fn translate_one(
         if raw.is_empty() {
             String::new()
         } else {
-            format!("regex:{raw}")
+            // Everything parses search operators before the `regex:` engine
+            // sees its payload. Without phrase quotes, alternation in a Rust
+            // regex (for example `(d|f)`) is consumed as Everything-level OR
+            // and can silently return no matches on Everything 1.4.x.
+            format!("regex:\"{raw}\"")
         }
     };
 
@@ -177,7 +184,7 @@ fn translate_one(
 }
 
 /// Escape the regex metacharacters in a literal so it can be embedded
-/// inside `regex:^…$` for `--exact`. Mirrors `regex::escape` but produces
+/// inside `regex:"^…$"` for `--exact`. Mirrors `regex::escape` but produces
 /// output Everything's regex engine accepts (POSIX-ish), which is the
 /// same metaset for our purposes.
 fn escape_regex_meta(s: &str) -> String {
@@ -314,12 +321,13 @@ mod tests {
     }
 
     /// PLAN §6.1: default branch (no flags) treats the pattern as a regex
-    /// and emits `regex:<pat>`. Regression here would make every fd
+    /// and emits a phrase-protected `regex:"<pat>"`. Regression here would
+    /// let Everything's outer query parser consume regex metacharacters and
     /// invocation match nothing on Everything.
     #[test]
     fn default_branch_is_regex() {
         let q = translate(&input_for("foo"), root()).unwrap();
-        assert_eq!(q.pattern.everything_query, "regex:foo");
+        assert_eq!(q.pattern.everything_query, "regex:\"foo\"");
         assert_eq!(q.pattern.scope, PatternScope::Basename);
         assert_eq!(q.pattern.case_modifier, CaseModifier::Nocase);
     }
@@ -352,7 +360,16 @@ mod tests {
         let mut input = input_for("foo.bar");
         input.exact = true;
         let q = translate(&input, root()).unwrap();
-        assert_eq!(q.pattern.everything_query, r"regex:^foo\.bar$");
+        assert_eq!(q.pattern.everything_query, r#"regex:"^foo\.bar$""#);
+    }
+
+    /// Regression: Everything's query parser treats a bare `|` as its own
+    /// OR operator before `regex:` evaluation. The regex payload must be
+    /// phrase-quoted so alternation reaches the regex engine intact.
+    #[test]
+    fn regex_alternation_is_quoted_for_everything_query_parser() {
+        let q = translate(&input_for(r"^(d|f)xc\.exe$"), root()).unwrap();
+        assert_eq!(q.pattern.everything_query, r#"regex:"^(d|f)xc\.exe$""#);
     }
 
     /// PLAN §6.1 row 5: case is determined by the caller's
@@ -385,8 +402,8 @@ mod tests {
         input.and_patterns = &extras;
         let q = translate(&input, root()).unwrap();
         assert_eq!(q.and_patterns.len(), 2);
-        assert_eq!(q.and_patterns[0].everything_query, "regex:bar");
-        assert_eq!(q.and_patterns[1].everything_query, "regex:baz");
+        assert_eq!(q.and_patterns[0].everything_query, "regex:\"bar\"");
+        assert_eq!(q.and_patterns[1].everything_query, "regex:\"baz\"");
     }
 
     /// PLAN §6.2: an `--and` pattern triggering the unsupported detector

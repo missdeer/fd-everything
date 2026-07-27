@@ -303,7 +303,7 @@ mod tests {
     fn base_query() -> BackendQuery {
         BackendQuery {
             paths: vec![PathBuf::from(r"C:\repo")],
-            pattern: pattern("regex:foo", PatternScope::Basename),
+            pattern: pattern("regex:\"foo\"", PatternScope::Basename),
             and_patterns: vec![],
             type_hint: None,
             size_hint: None,
@@ -334,15 +334,15 @@ mod tests {
     #[test]
     fn pattern_scope_emits_inline_modifier() {
         let mut q = base_query();
-        q.pattern = pattern("regex:foo", PatternScope::Basename);
-        assert!(build_search_string(&q, &q.paths[0]).contains("nopath:regex:foo"));
+        q.pattern = pattern("regex:\"foo\"", PatternScope::Basename);
+        assert!(build_search_string(&q, &q.paths[0]).contains("nopath:regex:\"foo\""));
 
-        q.pattern = pattern("regex:foo", PatternScope::FullPath);
+        q.pattern = pattern("regex:\"foo\"", PatternScope::FullPath);
         let s = build_search_string(&q, &q.paths[0]);
         // The pattern must carry its own `path:` and the root must also
         // appear behind a `path:` — there's no ambiguity because the root
         // is the LAST `path:` term and Everything ANDs them.
-        assert!(s.contains("path:regex:foo"));
+        assert!(s.contains("path:regex:\"foo\""));
         assert!(s.contains(r#"path:"C:\repo""#));
     }
 
@@ -368,13 +368,13 @@ mod tests {
     fn and_patterns_append_with_own_scope() {
         let mut q = base_query();
         q.and_patterns = vec![
-            pattern("regex:bar", PatternScope::Basename),
-            pattern("regex:baz", PatternScope::FullPath),
+            pattern("regex:\"bar\"", PatternScope::Basename),
+            pattern("regex:\"baz\"", PatternScope::FullPath),
         ];
         let s = build_search_string(&q, &q.paths[0]);
-        assert!(s.contains("nopath:regex:foo"));
-        assert!(s.contains("nopath:regex:bar"));
-        assert!(s.contains("path:regex:baz"));
+        assert!(s.contains("nopath:regex:\"foo\""));
+        assert!(s.contains("nopath:regex:\"bar\""));
+        assert!(s.contains("path:regex:\"baz\""));
     }
 
     /// PLAN §5.1 depth contract: direct children of the root are depth 1,

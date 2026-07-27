@@ -209,7 +209,7 @@ mod tests {
         );
         match &choices[0] {
             BackendChoice::Everything(q) => {
-                assert_eq!(q.pattern.everything_query, "regex:foo");
+                assert_eq!(q.pattern.everything_query, "regex:\"foo\"");
                 assert_eq!(q.paths, vec![PathBuf::from(r"C:\repo")]);
             }
             other => panic!("expected Everything choice, got {other:?}"),

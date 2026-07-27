@@ -47,8 +47,8 @@ pub struct BackendQuery {
 /// LegacyWalkerBackend ignores this and uses its own state.
 #[derive(Debug, Clone)]
 pub struct TranslatedPattern {
-    /// Everything query fragment, e.g. `regex:^foo$`, `wildcards:*.rs`, or a
-    /// phrase-form literal.
+    /// Everything query fragment, e.g. `regex:"^foo$"`, `wildcards:*.rs`, or
+    /// a phrase-form literal.
     pub everything_query: String,
     pub scope: PatternScope,
     pub case_modifier: CaseModifier,
