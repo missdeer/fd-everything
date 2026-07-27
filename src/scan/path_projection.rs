@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::dir_entry::starts_with_dash;
-use crate::filesystem::strip_current_dir;
+use crate::filesystem::{strip_current_dir, strip_path_prefix};
 
 /// A search root in two forms: the canonical absolute path used to match
 /// every hit's `raw_path`, and the display form as supplied by the user
@@ -119,12 +119,9 @@ impl<'a> PathProjector<'a> {
         // Strip the canonical prefix to get the relative tail, then re-glue
         // onto the user-given display root.
         //
-        // strip_prefix returns Err if raw_path == canonical exactly (it
-        // doesn't, it returns Ok("")), or if matching fails. The find_root
-        // pre-check guarantees a match here.
-        let rel = raw_path
-            .strip_prefix(&root.canonical)
-            .unwrap_or(Path::new(""));
+        // The find_root pre-check guarantees a platform-native prefix match
+        // here, including case-insensitive matching on Windows.
+        let rel = strip_path_prefix(raw_path, &root.canonical).unwrap_or(Path::new(""));
 
         // Fast path: display root is the same as canonical (user passed an
         // absolute path). Re-gluing would produce the same bytes as
@@ -153,7 +150,7 @@ impl<'a> PathProjector<'a> {
         // roots is sorted longest-first; first prefix match wins.
         self.roots
             .iter()
-            .find(|r| raw_path.starts_with(&r.canonical))
+            .find(|r| strip_path_prefix(raw_path, &r.canonical).is_some())
     }
 }
 
@@ -320,5 +317,17 @@ mod tests {
         let out = p.project_for_output(raw);
         assert!(matches!(out, Cow::Borrowed(_)));
         assert_eq!(out.as_ref(), raw);
+    }
+
+    /// Everything uses the indexed spelling of a Windows path, which may
+    /// differ in case from the root typed by the user. Projection must still
+    /// recognize the root and retain the relative tail.
+    #[cfg(windows)]
+    #[test]
+    fn projects_windows_root_with_different_case() {
+        let roots = vec![root(r"C:\vulkanSDK", r"C:\vulkanSDK")];
+        let p = PathProjector::owned(roots, false, false);
+        let raw = Path::new(r"C:\VulkanSDK\1.4.350.0\Bin\dxc.exe");
+        assert_eq!(p.project_for_output(raw).as_ref(), raw);
     }
 }
