@@ -200,7 +200,7 @@ pub struct BackendQuery {
 // v6: 替代 v5 的 literal_hints。EverythingBackend 直接消费此结构组装查询字符串；
 // LegacyWalkerBackend 不读，靠 Config 中的原始 fd 状态运行。
 pub struct TranslatedPattern {
-    pub everything_query: String,              // 如 "regex:^foo$" / "wildcards:*.rs" / phrase 形式字面量
+    pub everything_query: String,              // 如 `regex:"^foo$"` / "wildcards:*.rs" / phrase 形式字面量
     pub scope: PatternScope,                   // Basename | FullPath
     pub case_modifier: CaseModifier,           // Case | Nocase
 }
@@ -632,9 +632,9 @@ Windows 上 gitignore 匹配是 case-insensitive（`Gitignore::case_insensitive(
 
 **Phase 6 完成清单**：
 
-- ✅ **6.1 Pattern 翻译**（`src/scan/backend/everything/query/mod.rs::translate`）：默认 regex 走 `regex:<pat>`；`--glob` 走 `wildcards:<pat>`（`**/` 删除、`{a,b}` 展开成 `|`-joined alternatives；见 `query/glob.rs`）；`--fixed-strings` 走 §6.1.1 phrase quoting（见 `query/literal.rs`）；`--exact` 走 `regex:^<escaped>$`（共享 literal 转义后用 §6.1.1 的同套规则判 give-up）；`--and` 各 pattern 独立翻译并塞进 `BackendQuery.and_patterns`，任一回退即整次回退（PLAN §6.1 contract）；case 完全复用 `TranslationInput.case_sensitive`（translation 层不二次判 smartcase）；scope 由 `--full-path` 决定（`PatternScope::FullPath`），默认 `Basename`。
+- ✅ **6.1 Pattern 翻译**（`src/scan/backend/everything/query/mod.rs::translate`）：默认 regex 走 `regex:"<pat>"`（phrase quotes 防止 Everything 外层查询解析器先消费 `|`、`^`、`\`）；`--glob` 走 `wildcards:<pat>`（`**/` 删除、`{a,b}` 展开成 `|`-joined alternatives；见 `query/glob.rs`）；`--fixed-strings` 走 §6.1.1 phrase quoting（见 `query/literal.rs`）；`--exact` 走 `regex:"^<escaped>$"`（共享 literal 转义后用 §6.1.1 的同套规则判 give-up）；`--and` 各 pattern 独立翻译并塞进 `BackendQuery.and_patterns`，任一回退即整次回退（PLAN §6.1 contract）；case 完全复用 `TranslationInput.case_sensitive`（translation 层不二次判 smartcase）；scope 由 `--full-path` 决定（`PatternScope::FullPath`），默认 `Basename`。
 - ✅ **6.1.1 `--fixed-strings` 转义**（`query/literal.rs`）：保守白名单——`"`/`\`/`*`/`?` 直接 give-up；其余全部 phrase-quoted 包裹；空 literal 输出空 fragment（"match every name" 语义）；rule 3/4/5 各有命名单测。
-- ✅ **6.2 Unsupported 检测**（`query/unsupported.rs`）：`regex_syntax::ast::parse::Parser` 扫 AST，9 个 `RejectReason` 变体一一对应 PLAN §6.2 rule 1–9；`AssertionKind` 列举未覆盖的新变体走 `_ => UnsupportedAnchor` 兜底（防御 regex-syntax minor-version 增加新锚点）；不可 parse 的输入采"best-effort"立场——返回 `Ok(())`，让 Everything 引擎自己出错（避免与 fd 已经验证过的 regex crate 行为分叉）；`Flag::CRLF` / `Flag::SwapGreed` / `Flag::IgnoreWhitespace` 也算 unsupported flag（v0.8 enum 新增项）。`\Z` 在 regex-syntax 0.8 不是稳定 token，PLAN §6.2 best-effort 立场下让 Everything 引擎反馈错误。
+- ✅ **6.2 Unsupported 检测**（`query/unsupported.rs`）：`regex_syntax::ast::parse::Parser` 扫 AST，并额外拒绝无法嵌入 Everything phrase quotes 的 `"`；各类不兼容均有具名 `RejectReason`；`AssertionKind` 列举未覆盖的新变体走 `_ => UnsupportedAnchor` 兜底（防御 regex-syntax minor-version 增加新锚点）；不可 parse 的输入采"best-effort"立场——返回 `Ok(())`，让 Everything 引擎自己出错（避免与 fd 已经验证过的 regex crate 行为分叉）；`Flag::CRLF` / `Flag::SwapGreed` / `Flag::IgnoreWhitespace` 也算 unsupported flag（v0.8 enum 新增项）。`\Z` 在 regex-syntax 0.8 不是稳定 token，PLAN §6.2 best-effort 立场下让 Everything 引擎反馈错误。
 - ✅ **6.3 其他 CLI 维度**：`max_depth` / `max_results` 透传到 `BackendQuery`（Phase 5 day-1 backend 已消费 `max_results`）；`type_hint` 仅当 `FileTypes` 为纯 files-only 或纯 dirs-only 时填 `EntryTypeHint::File` / `Directory`（mixed / executables_only / empty_only / symlinks / 设备类一律 None——post-filter 是 canonical）；`size_hint` 合并多 `SizeFilter` 取最紧 bound（`derive_size_hint`）；`time_hint` 把 `TimeFilter::After` / `Before` 转成 Windows FILETIME（`system_time_to_filetime`，1601→1970 偏移 11_644_473_600s）。`--extension` / `size:` / `dm:` / `depth:` 的 Everything 查询串 push-down 推迟到 Phase 7/8——post-filter 已 canonical，pushdown 纯优化（PLAN §6.3 "仍 post-filter 兜底"）。
 - ✅ **6.4 后端自动选择**（`src/scan/backend/everything/selection.rs`）：`select_backend(paths, input, probe, force_legacy)` 按 path 独立分类成 `BackendChoice::Everything(query)` / `BackendChoice::Legacy { reason }`；`force_legacy` 镜像未来 `--filesystem-walker` flag（CLI 加 flag 在 Phase 7）；`VolumeIndexProbe` trait 把"是否在 Everything 索引卷"抽象掉，Phase 6 测试注 fake、Phase 7 接真 SDK probe；`AssumeIndexedProbe` 是预接线 stub（默认全部 indexed——确保 Phase 7 接线那刻 EverythingBackend 真的能跑起来，而不是被默认值静默退化到 LegacyWalker）；`FallbackReason::QueryUnsupported(TranslationGiveUp)` 保留结构化原因，`--show-errors` 在 Phase 7 可用。
 
@@ -658,10 +658,10 @@ Windows 上 gitignore 匹配是 case-insensitive（`Gitignore::case_insensitive(
 
 | fd 输入 | Everything 表达 | 备注 |
 |---|---|---|
-| 默认 regex pattern | `regex:<pat>` | 需 unsupported 检测，见 §6.2 |
+| 默认 regex pattern | `regex:"<pat>"` | phrase quotes 保护 payload 免受 Everything 外层查询解析；需 unsupported 检测，见 §6.2 |
 | `--glob`/`-g` | `wildcards:<pat>` | `**/` 删除；`{a,b}` 展开为多 wildcards 用 `|` 连接 |
 | `--fixed-strings`/`-F` | 字面量子串查询 | 详见 §6.1.1 |
-| `--exact-depth` 之外的 `--exact`（pattern 全匹配 basename） | `regex:^<escaped>$` 等价表达 | 配合下面 basename 约束 |
+| `--exact-depth` 之外的 `--exact`（pattern 全匹配 basename） | `regex:"^<escaped>$"` 等价表达 | 配合下面 basename 约束 |
 | `--and <p2> [--and <p3>...]` | Everything 主查询和每个 --and pattern 各自翻译后**用空格 AND 连接** | 任一 pattern 命中 §6.2 unsupported → 整次查询回退 LegacyWalker |
 | `Config.case_sensitive == true`（fd 在 CLI 层已合并 smartcase / `-s` / `-i` / inline 全局 `(?i)` 后的最终结论） | `case:` 前缀加在整个查询最前 | **不在 translation 层重判**，复用 fd 的判断结果 |
 | `Config.case_sensitive == false` | `nocase:` 前缀 | 同上 |

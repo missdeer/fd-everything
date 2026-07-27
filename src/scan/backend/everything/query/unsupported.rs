@@ -1,11 +1,11 @@
 //! Regex AST scanner that decides whether a regex pattern can be handed to
-//! Everything's `regex:` query verbatim or whether the translation layer
+//! Everything's `regex:` query or whether the translation layer
 //! must give up and route the query to `LegacyWalkerBackend`.
 //!
-//! Implements PLAN.md §6.2 (rules 1-9). Each `RejectReason` variant
-//! corresponds to one rule, so a regression that swallows an unsupported
-//! construct fails one specific named test rather than a generic
-//! "translation regressed".
+//! Implements PLAN.md §6.2 (rules 1-9), plus query-layer safety checks needed
+//! to embed the regex in Everything's outer search syntax. Named
+//! `RejectReason` variants ensure a regression fails a specific test rather
+//! than a generic "translation regressed" assertion.
 //!
 //! The scanner is best-effort: when the input string can't even be parsed by
 //! `regex-syntax`, we hand it to Everything anyway and let the SDK reject it.
@@ -22,10 +22,13 @@ use regex_syntax::ast::{
 /// Everything's `regex:` engine behaving differently on pathological input.
 pub(crate) const MAX_AST_DEPTH: usize = 16;
 
-/// One named rule violation. Variants line up 1:1 with PLAN.md §6.2 rules
-/// 1-9 so the reason can be surfaced verbatim in tests / future telemetry.
+/// One named incompatibility, surfaced verbatim in tests / future telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectReason {
+    /// The pattern contains `"`, which cannot be embedded in the quoted
+    /// `regex:"..."` term required to protect regex metacharacters from
+    /// Everything's outer query parser.
+    QueryQuote,
     /// Rule 1: `\p{…}` / `\P{…}` Unicode property class.
     UnicodeProperty,
     /// Rule 2: `\b` / `\B` / `\w` / `\W` / `\d` / `\D` / `\s` / `\S`
@@ -57,6 +60,15 @@ pub enum RejectReason {
 /// failure. Re-running our own parser would just diverge from fd's canonical
 /// `regex` crate behavior.
 pub fn check_regex_pattern(pattern: &str) -> Result<(), RejectReason> {
+    // Everything parses its search language before handing the payload of
+    // `regex:` to the regex engine. The payload therefore has to be phrase-
+    // quoted so query operators such as `|`, `^`, and `\` survive intact.
+    // Everything has no escape for a quote inside a phrase, so fall back to
+    // the filesystem walker for this rare (but valid Rust-regex) case.
+    if pattern.contains('"') {
+        return Err(RejectReason::QueryQuote);
+    }
+
     let mut parser = Parser::new();
     let ast = match parser.parse(pattern) {
         Ok(ast) => ast,
@@ -233,6 +245,16 @@ mod tests {
     #[test]
     fn plain_literal_is_accepted() {
         assert!(check_regex_pattern("foo").is_ok());
+    }
+
+    /// Everything's outer query language cannot represent a quote inside
+    /// the phrase that protects the regex payload.
+    #[test]
+    fn quote_routes_to_filesystem_walker() {
+        assert_eq!(
+            check_regex_pattern("foo\"bar").unwrap_err(),
+            RejectReason::QueryQuote
+        );
     }
 
     /// Empty input parses as an empty AST — must succeed (matches fd's

@@ -98,7 +98,7 @@ impl SdkGuard {
     }
 
     /// `Everything_SetRegex(true/false)` — we leave at `false` and use
-    /// `regex:<pat>` in the query string (per PLAN §6.1) so the toggle path
+    /// `regex:"<pat>"` in the query string (per PLAN §6.1) so the toggle path
     /// matches the modifier path exactly.
     pub fn set_regex(&self, enable: bool) {
         unsafe { sys::Everything_SetRegex(bool_to_win(enable)) };
