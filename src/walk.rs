@@ -34,7 +34,7 @@ use crate::scan::mock_injection;
 use crate::scan::pipeline_builder::build_pipeline;
 use crate::scan::post_filter::PostFilterSink;
 use crate::scan::sink::{Batch, BatchSender, WorkerResult};
-use crate::scan::sink_adapter::RawHitBatchSink;
+use crate::scan::sink_adapter::{RawHitBatchSink, RootRebaseSink};
 
 /// The receiver thread can either be buffering results or directly streaming to the console.
 #[derive(PartialEq)]
@@ -782,17 +782,43 @@ impl WorkerState {
                 break;
             }
 
-            // Use the canonicalized form so EverythingBackend's
-            // `path:"<root>"` modifier matches the index entries.
-            // `config.search_roots` is built in lock-step with `paths`
-            // in `main.rs::run`, so the same `idx` works for both.
-            let canonical = config
+            // The logical absolute root retains the user's symlink spelling.
+            // For a reparse-point root, query Everything at the resolved
+            // physical target and rebase each hit before post-filtering.
+            let logical_root = config
                 .search_roots
                 .get(idx)
                 .map(|sr| sr.canonical.clone())
                 .unwrap_or_else(|| path.clone());
 
-            let choice = self.classify_backend(&translation_input, canonical, probe);
+            let root_mapping = match resolve_reparse_query_root(&logical_root) {
+                Ok(Some(query_root)) => {
+                    // Everything applies full-path patterns before hits reach
+                    // our rebase adapter. Rewriting an arbitrary regex/glob
+                    // from the logical prefix to the physical prefix is not
+                    // semantics-preserving, so keep upstream fd behavior.
+                    if config.full_path_base.is_some() {
+                        initial_legacy.push(path.clone());
+                        continue;
+                    }
+                    Some(RootMapping {
+                        query_root,
+                        logical_root: Arc::new(logical_root.clone()),
+                    })
+                }
+                Ok(None) => None,
+                Err(_) => {
+                    initial_legacy.push(path.clone());
+                    continue;
+                }
+            };
+
+            let backend_root = root_mapping
+                .as_ref()
+                .map(|mapping| mapping.query_root.clone())
+                .unwrap_or(logical_root);
+
+            let choice = self.classify_backend(&translation_input, backend_root, probe);
             match choice {
                 BackendChoice::Legacy { .. } => initial_legacy.push(path.clone()),
                 BackendChoice::Everything(query) => {
@@ -802,11 +828,18 @@ impl WorkerState {
                     // `classify_backend` would have returned Legacy before
                     // we got here.
                     let outcome = match mock_backend.as_ref() {
-                        Some(mock) => self.drive_backend_root(mock, &query, path, tx.clone()),
+                        Some(mock) => self.drive_backend_root(
+                            mock,
+                            &query,
+                            path,
+                            root_mapping.as_ref(),
+                            tx.clone(),
+                        ),
                         None => self.drive_backend_root(
                             &EverythingBackend::new(),
                             &query,
                             path,
+                            root_mapping.as_ref(),
                             tx.clone(),
                         ),
                     };
@@ -853,6 +886,7 @@ impl WorkerState {
         backend: &dyn SearchBackend,
         query: &BackendQuery,
         current_root: &Path,
+        root_mapping: Option<&RootMapping>,
         tx: Sender<Batch>,
     ) -> EverythingOutcome {
         let config = &self.config;
@@ -887,7 +921,17 @@ impl WorkerState {
         let mut downstream = RawHitBatchSink::new(batch_sender);
         let mut sink = PostFilterSink::new(pipeline, &mut downstream, &cancel);
 
-        let result = backend.run(query, &mut sink, &cancel);
+        let result = match root_mapping {
+            Some(mapping) => {
+                let mut rebase_sink = RootRebaseSink::new(
+                    &mut sink,
+                    &mapping.query_root,
+                    Arc::clone(&mapping.logical_root),
+                );
+                backend.run(query, &mut rebase_sink, &cancel)
+            }
+            None => backend.run(query, &mut sink, &cancel),
+        };
 
         // Drain any buffered hits from `prune` etc. — but only when the
         // backend completed cleanly or was cancelled. A hard backend
@@ -975,6 +1019,36 @@ enum EverythingOutcome {
     HardError(String),
 }
 
+#[cfg(target_os = "windows")]
+struct RootMapping {
+    query_root: PathBuf,
+    logical_root: Arc<PathBuf>,
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_reparse_query_root(path: &Path) -> io::Result<Option<PathBuf>> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let metadata = path.symlink_metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        return Ok(None);
+    }
+    path.canonicalize().map(strip_verbatim_prefix).map(Some)
+}
+
+#[cfg(target_os = "windows")]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
 fn search_str_for_entry<'a>(
     entry_path: &'a std::path::Path,
     full_path_base: Option<&std::path::Path>,
@@ -1010,6 +1084,8 @@ pub fn scan(paths: &[PathBuf], patterns: Vec<Regex>, config: Config) -> Result<E
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::resolve_reparse_query_root;
     use super::search_str_for_entry;
     use std::path::{Path, PathBuf};
 
@@ -1062,5 +1138,24 @@ mod tests {
             search_str_for_entry(Path::new("foo"), None),
             PathBuf::from("foo")
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reparse_point_search_root_resolves_to_query_target() {
+        use std::fs;
+        use std::os::windows::fs::symlink_dir;
+
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        fs::create_dir(&target).expect("create symlink target");
+        symlink_dir(&target, &link).expect("create directory symlink");
+
+        assert_eq!(resolve_reparse_query_root(&target).unwrap(), None);
+        let resolved = resolve_reparse_query_root(&link)
+            .unwrap()
+            .expect("directory symlink must resolve");
+        assert!(crate::filesystem::paths_equal(&resolved, &target));
     }
 }

@@ -56,6 +56,10 @@ lives in `README.md`.
 - Add `--exact` option to match the entire filename exactly (literal, non-substring).
 
 ## Bugfixes
+- Resolve symlink and junction search roots before querying Everything, then
+  map physical hits back onto the user-supplied link path before filtering.
+  This avoids index-dependent empty results without leaking target paths;
+  resolution failures and full-path pattern searches use the filesystem walker.
 - Sanitize control characters and bidirectional override characters in filenames
   when output goes to a terminal, to prevent terminal escape-sequence injection.
   Also reject a placeholder as the executable for `--exec-batch`, while still

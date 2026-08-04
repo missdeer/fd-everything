@@ -15,9 +15,52 @@
 //! orchestrator stops scheduling more roots — matching PLAN §Phase 3 §3.X
 //! "下游错误必须 surface" contract.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use crate::dir_entry::DirEntry;
+use crate::filesystem::strip_path_prefix;
 use crate::scan::backend::{BackendError, BackendSink, RawHit};
 use crate::scan::sink::{BatchSender, WorkerResult};
+
+/// Rebase backend hits from a resolved symlink target onto the logical root
+/// supplied by the user. This adapter must sit before `PostFilterSink`: ignore
+/// matching, metadata fallbacks, `--exec`, and output projection all need to
+/// observe the link spelling rather than the physical target spelling.
+pub(crate) struct RootRebaseSink<'a, S: BackendSink + ?Sized> {
+    downstream: &'a mut S,
+    query_root: &'a Path,
+    logical_root: Arc<PathBuf>,
+}
+
+impl<'a, S: BackendSink + ?Sized> RootRebaseSink<'a, S> {
+    pub(crate) fn new(
+        downstream: &'a mut S,
+        query_root: &'a Path,
+        logical_root: Arc<PathBuf>,
+    ) -> Self {
+        Self {
+            downstream,
+            query_root,
+            logical_root,
+        }
+    }
+}
+
+impl<S: BackendSink + ?Sized> BackendSink for RootRebaseSink<'_, S> {
+    fn send(&mut self, mut hit: RawHit) -> Result<(), BackendError> {
+        let relative = strip_path_prefix(&hit.path, self.query_root).ok_or_else(|| {
+            BackendError::Other(anyhow::anyhow!(
+                "backend returned {} outside resolved search root {}",
+                hit.path.display(),
+                self.query_root.display()
+            ))
+        })?;
+        hit.path = self.logical_root.join(relative);
+        hit.search_root = Arc::clone(&self.logical_root);
+        self.downstream.send(hit)
+    }
+}
 
 /// `BackendSink` implementation that bridges a Phase 5 backend to the
 /// Phase 2 `BatchSender`. Owns the sender by move because each backend
@@ -121,5 +164,56 @@ mod tests {
             .send(hit("a.txt", &root))
             .expect_err("disconnect must surface as Cancelled");
         assert!(matches!(err, BackendError::Cancelled));
+    }
+
+    #[test]
+    fn root_rebase_sink_rewrites_path_and_search_root() {
+        struct VecSink(Vec<RawHit>);
+        impl BackendSink for VecSink {
+            fn send(&mut self, hit: RawHit) -> Result<(), BackendError> {
+                self.0.push(hit);
+                Ok(())
+            }
+        }
+
+        let query_root = PathBuf::from(r"D:\real\repo");
+        let logical_root = Arc::new(PathBuf::from(r"D:\links\repo"));
+        let physical_root = Arc::new(query_root.clone());
+        let mut downstream = VecSink(Vec::new());
+        let mut sink = RootRebaseSink::new(&mut downstream, &query_root, Arc::clone(&logical_root));
+
+        sink.send(hit(r"sub\a.py", &physical_root)).unwrap();
+        drop(sink);
+
+        assert_eq!(downstream.0.len(), 1);
+        assert_eq!(
+            downstream.0[0].path,
+            PathBuf::from(r"D:\links\repo\sub\a.py")
+        );
+        assert_eq!(downstream.0[0].search_root, logical_root);
+    }
+
+    #[test]
+    fn root_rebase_sink_rejects_hits_outside_query_root() {
+        struct VecSink(Vec<RawHit>);
+        impl BackendSink for VecSink {
+            fn send(&mut self, hit: RawHit) -> Result<(), BackendError> {
+                self.0.push(hit);
+                Ok(())
+            }
+        }
+
+        let query_root = PathBuf::from(r"D:\real\repo");
+        let logical_root = Arc::new(PathBuf::from(r"D:\links\repo"));
+        let outside_root = Arc::new(PathBuf::from(r"D:\other"));
+        let mut downstream = VecSink(Vec::new());
+        let mut sink = RootRebaseSink::new(&mut downstream, &query_root, logical_root);
+
+        let err = sink
+            .send(hit("a.py", &outside_root))
+            .expect_err("out-of-root backend hit must fail");
+        assert!(matches!(err, BackendError::Other(_)));
+        drop(sink);
+        assert!(downstream.0.is_empty());
     }
 }

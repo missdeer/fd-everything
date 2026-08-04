@@ -66,8 +66,12 @@ from divergent CLI handling.
   you need streaming `--exec`, drop `--prune`.
 * **Symlinks and reparse points are not expanded under the Everything
   backend.** Everything returns whatever the index stores; junctions and
-  symlinks are emitted as themselves rather than resolved targets. The
-  legacy walker continues to honour `--follow` as upstream `fd` does.
+  symlinks found below an ordinary search root are emitted as themselves
+  rather than resolved targets. When a search root itself is a symlink or
+  junction, fde queries Everything using the resolved target and maps each
+  hit back onto the link path before filtering and output. Resolution failures
+  and `--full-path` searches fall back to the legacy walker. The legacy walker
+  continues to honour `--follow` as upstream `fd` does.
 * **Ctrl-C latency is bounded by hit cadence, not query duration.** The
   EverythingBackend polls the cancellation token between hits, so Ctrl-C
   unwinds within one hit interval (sub-millisecond on typical workloads).
