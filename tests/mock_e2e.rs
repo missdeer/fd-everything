@@ -133,6 +133,78 @@ fn mock_injection_streams_hits_through_pipeline() {
     );
 }
 
+/// A symlink search root is resolved for the Everything query, then every
+/// physical hit is rebased to the logical link path before ignore filtering
+/// and output projection. This keeps the fast backend without exposing the
+/// target spelling or applying ignore rules against the target's parents.
+#[test]
+fn symlink_root_queries_target_and_rebases_before_filters() {
+    use std::os::windows::fs::symlink_dir;
+
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("target");
+    let link = tmp.path().join("link");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join(".fdignore"), "ignored.py\n").unwrap();
+    fs::write(target.join("visible.py"), b"visible").unwrap();
+    fs::write(target.join("ignored.py"), b"ignored").unwrap();
+    symlink_dir(&target, &link).unwrap();
+
+    let hits_dir = TempDir::new().unwrap();
+    let hits_file = write_hit_file(
+        hits_dir.path(),
+        "hits.txt",
+        &[
+            &target.join("visible.py").display().to_string(),
+            &target.join("ignored.py").display().to_string(),
+        ],
+    );
+
+    let (stdout, stderr, code) = run_fde_with_mock(
+        tmp.path(),
+        &hits_file,
+        &["-e", "py", ".", "link", "-d", "1"],
+    );
+    assert_eq!(code, Some(0), "fde must exit 0; stderr={stderr}");
+    let got = sorted_lines(&stdout);
+    assert_eq!(got, vec!["link/visible.py"]);
+    assert!(
+        !stdout.contains("target"),
+        "physical target leaked: {stdout}"
+    );
+}
+
+/// Full-path matching happens inside Everything before the rebase adapter can
+/// replace the physical target prefix. Arbitrary regexes cannot be rewritten
+/// safely, so this combination must use the filesystem walker.
+#[test]
+fn symlink_root_full_path_search_uses_filesystem_walker() {
+    use std::os::windows::fs::symlink_dir;
+
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("target");
+    let link = tmp.path().join("link");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("visible.py"), b"visible").unwrap();
+    symlink_dir(&target, &link).unwrap();
+
+    let hits_dir = TempDir::new().unwrap();
+    let hits_file = write_hit_file(
+        hits_dir.path(),
+        "hits.txt",
+        &[&target.join("ghost.py").display().to_string()],
+    );
+
+    let (stdout, stderr, code) =
+        run_fde_with_mock(tmp.path(), &hits_file, &["--full-path", "visible", "link"]);
+    assert_eq!(code, Some(0), "fde must exit 0; stderr={stderr}");
+    assert_eq!(sorted_lines(&stdout), vec!["link/visible.py"]);
+    assert!(
+        !stdout.contains("ghost.py"),
+        "mock backend leaked: {stdout}"
+    );
+}
+
 /// Encodes the §Phase 8.5-D + §8g flag-precedence contract:
 /// `--filesystem-walker` MUST win over `FDE_TEST_MOCK_HITS`. The user's
 /// CLI escape hatch overrides any test harness env var. If this
