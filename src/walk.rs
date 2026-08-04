@@ -1084,9 +1084,9 @@ pub fn scan(paths: &[PathBuf], patterns: Vec<Regex>, config: Config) -> Result<E
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "windows")]
-    use super::resolve_reparse_query_root;
     use super::search_str_for_entry;
+    #[cfg(target_os = "windows")]
+    use super::{resolve_reparse_query_root, strip_verbatim_prefix};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1156,6 +1156,13 @@ mod tests {
         let resolved = resolve_reparse_query_root(&link)
             .unwrap()
             .expect("directory symlink must resolve");
-        assert!(crate::filesystem::paths_equal(&resolved, &target));
+        // Runner temp directories can themselves contain path aliases, so
+        // compare the canonical forms on both sides.
+        let expected = strip_verbatim_prefix(
+            target
+                .canonicalize()
+                .expect("canonicalize directory symlink target"),
+        );
+        assert!(crate::filesystem::paths_equal(&resolved, &expected));
     }
 }
