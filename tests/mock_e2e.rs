@@ -44,6 +44,20 @@ fn write_hit_file(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
     path
 }
 
+/// Match the path form used by `resolve_reparse_query_root`: resolve any
+/// runner-level aliases, then remove the verbatim prefix Everything omits.
+fn canonical_mock_root(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().expect("canonicalize mock root");
+    let text = canonical.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        canonical
+    }
+}
+
 /// Run `fde` with `FDE_TEST_MOCK_HITS=<hits>` and the given argv (search
 /// root + pattern). Returns (stdout, stderr, exit_code) so each test can
 /// assert what it cares about. `FDE_BACKEND` is explicitly removed: PLAN
@@ -151,12 +165,13 @@ fn symlink_root_queries_target_and_rebases_before_filters() {
     symlink_dir(&target, &link).unwrap();
 
     let hits_dir = TempDir::new().unwrap();
+    let query_target = canonical_mock_root(&target);
     let hits_file = write_hit_file(
         hits_dir.path(),
         "hits.txt",
         &[
-            &target.join("visible.py").display().to_string(),
-            &target.join("ignored.py").display().to_string(),
+            &query_target.join("visible.py").display().to_string(),
+            &query_target.join("ignored.py").display().to_string(),
         ],
     );
 
