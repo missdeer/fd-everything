@@ -63,7 +63,7 @@ impl<'a> Display for SanitizedStr<'a> {
 }
 
 /// Sanitize for terminal output only; raw bytes pass through on pipes/files.
-pub fn sanitize_for_term(raw: &str, is_terminal: bool) -> SanitizedStr<'_> {
+pub(crate) fn sanitize_for_term(raw: &str, is_terminal: bool) -> SanitizedStr<'_> {
     SanitizedStr {
         raw,
         is_safe: !is_terminal,
