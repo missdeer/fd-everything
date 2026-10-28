@@ -198,6 +198,7 @@ impl TestEnv {
         Ok(broken_symlink_link)
     }
 
+    #[cfg(unix)]
     pub fn create_symlink<P: AsRef<Path>>(
         &mut self,
         target: P,
@@ -206,10 +207,7 @@ impl TestEnv {
         let root = self.test_root();
         let target_path = root.join(target);
         let link_path = root.join(link_path);
-        #[cfg(unix)]
         unix::fs::symlink(&target_path, &link_path)?;
-        #[cfg(windows)]
-        windows::fs::symlink_file(&target_path, &link_path)?;
 
         Ok(link_path)
     }
